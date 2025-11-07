@@ -1,0 +1,46 @@
+# Baseline experiment: Vanilla GRPO on GSM8K
+# This is your reference point for all variants
+
+variant:
+  name: "baseline"
+  description: "Vanilla GRPO - no modifications"
+  advantage_class: null  # Use default verl implementation
+  loss_class: null
+  reward_class: null
+  sampler_class: null
+
+model:
+  path: "Qwen/Qwen3-8B"
+  output_dir: "./checkpoints"
+
+data:
+  train_files: "/data/gsm8k/train.parquet"
+  val_files: "/data/gsm8k/test.parquet"
+  train_batch_size: 1024
+  max_prompt_length: 512
+  max_response_length: 1024
+
+algorithm:
+  name: "grpo"
+  adv_estimator: "grpo"
+
+training:
+  learning_rate: 1.0e-6
+  total_epochs: 15
+  save_freq: 20
+  test_freq: 5
+
+cluster:
+  n_gpus_per_node: 8
+  nnodes: 1
+
+backend:
+  name: "vllm"  # or "sglang"
+  tensor_parallel_size: 2
+  gpu_memory_utilization: 0.6
+
+logging:
+  project_name: "verl_research"
+  experiment_name: "baseline_grpo_gsm8k"
+  loggers: ["console", "wandb"]
+  wandb_enabled: true
