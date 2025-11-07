@@ -1,0 +1,56 @@
+# Experiment configuration template
+# Copy this when creating a new experiment
+
+# Variant configuration
+variant:
+  name: "template_experiment"
+  description: "Description of your idea"
+
+  # Which extension to use (or null for baseline)
+  advantage_class: null  # e.g., "variant.MyAdvantage"
+  loss_class: null       # e.g., "variant.MyLoss"
+  reward_class: null     # e.g., "variant.MyReward"
+  sampler_class: null    # e.g., "variant.MySampler"
+
+# Model configuration
+model:
+  path: "Qwen/Qwen3-8B"
+  output_dir: "./checkpoints"
+
+# Data configuration
+data:
+  train_files: "/path/to/train.parquet"
+  val_files: "/path/to/val.parquet"
+  train_batch_size: 1024
+  max_prompt_length: 512
+  max_response_length: 1024
+
+# Algorithm configuration
+algorithm:
+  name: "grpo"  # or "ppo", "reinforce++", "rloo", "remax"
+  adv_estimator: "grpo"  # Advantage estimator type
+
+# Training hyperparameters
+training:
+  learning_rate: 1.0e-6
+  total_epochs: 15
+  save_freq: 20
+  test_freq: 5
+
+# Cluster configuration
+cluster:
+  n_gpus_per_node: 8
+  nnodes: 1
+
+# Backend configuration
+backend:
+  name: "vllm"  # or "sglang"
+  tensor_parallel_size: 2
+  gpu_memory_utilization: 0.6
+
+# Logging
+logging:
+  project_name: "verl_research"
+  experiment_name: "template_experiment"
+  loggers: ["console", "wandb"]
+  wandb_enabled: false
