@@ -24,7 +24,7 @@ jobs:
         uses: jlumbroso/free-disk-space@v1.3.1
         with:
           tool-cache: true
-          docker-images: false
+          docker-images: true
           
       - name: Checkout code
         uses: actions/checkout@v4
@@ -33,6 +33,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
 
       - name: Get base image name and tag
         id: base_image

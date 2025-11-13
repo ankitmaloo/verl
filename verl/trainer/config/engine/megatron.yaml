@@ -76,3 +76,6 @@ use_mbridge: False
 
 # whether to use forward only
 forward_only: False
+
+# Mixed precision training param dtype
+dtype: bfloat16 # ["bfloat16", "float16"]
