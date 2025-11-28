@@ -1,11 +1,13 @@
 ---
 name: verl-training
-description: Complete guide for building RL training pipelines with VERL. Covers how to call inference (SGLang/vLLM/HuggingFace), setup training with policy/value updates, configure datasets and environment, and implement custom reward/advantage algorithms. Use when developing reinforcement learning systems with VERL for tasks involving: (1) Model rollout and generation, (2) Policy and value function training, (3) Data pipeline setup, (4) Reward computation and advantage estimation, (5) Multi-turn conversations and tool calling, (6) Custom algorithms and loss functions.
+description: Complete guide for building RL training pipelines with VERL. Write 4 simple Python files (algorithm.py, inference.py, training.py, env.py) that call VERL components directly for fast iteration. Covers: (1) Model rollout and generation (SGLang/vLLM/HuggingFace), (2) Policy and value function training, (3) Data pipeline and RL environments, (4) Reward computation and advantage estimation (GAE, GRPO, etc.), (5) Multi-turn conversations and tool calling, (6) Custom algorithms and loss functions. Use for standalone RL training scripts or modifying VERL internals.
 ---
 
 # VERL Training
 
-Complete reference for building RL training pipelines using VERL libraries. This skill covers the four core components of any RL system: Inference, Training, Environment, and Algorithm.
+Write simple Python files that call VERL components for RL training. No abstraction, just direct usage of VERL's inference, training, and algorithm utilities.
+
+**Best for:** Fast iteration, experimenting with datasets/RL environments, custom rewards, multi-turn conversations.
 
 ## Core Concepts
 
@@ -26,9 +28,18 @@ Load Batch (ENV)
           → Update Value Function (TRAINING)
 ```
 
-## Quick Start: Building a Training Script
+## Quick Start: Write 4 Simple Python Files
 
-The main entry point is `python3 -m verl.trainer.main_ppo` with Hydra configuration. See **references/quickstart.md** for a step-by-step example.
+**For fast iteration, write standalone scripts:**
+
+1. `algorithm.py` - Main training loop (run this)
+2. `inference.py` - Calls VERL rollout workers
+3. `training.py` - Calls VERL actor/critic
+4. `env.py` - Your data source (modify this for different tasks)
+
+**See: [references/standalone.md](references/standalone.md)** for complete copy-paste patterns.
+
+**Alternative:** Use VERL's built-in entry point `python3 -m verl.trainer.main_ppo` with Hydra config (see component guides below).
 
 ## The Four Core Components
 
@@ -165,52 +176,15 @@ The complete execution traces how config flows through the VERL pipeline:
 
 ## Common Modifications
 
-### Add Multi-Turn Conversation
-```bash
-actor_rollout_ref.rollout.name=sglang \
-data.chat_template=chatml
-```
-See **references/inference.md** → Multi-Turn Conversations
+**For standalone scripts**, see **[references/standalone.md](references/standalone.md)** for:
+- Switching inference engines (SGLang/vLLM/HF)
+- Multi-turn conversations
+- Tool calling
+- Custom reward functions
+- RL game environments
+- Curriculum learning
 
-### Create Custom Reward Function
-```python
-# my_reward.py
-from verl import DataProto
-import torch
-
-def compute_reward(data: DataProto, **kwargs) -> torch.Tensor:
-    rewards = torch.zeros(len(data.batch))
-    for i, response in enumerate(data.responses):
-        # Your scoring logic
-        rewards[i] = score_response(response)
-    return rewards
-```
-Config: `reward_model.custom_reward_function.path=my_reward.py`
-
-See **references/algorithms.md** → Custom Reward Functions
-
-### Switch to GRPO Advantage Estimation
-```bash
-algorithm.adv_estimator=grpo
-```
-See **references/algorithms.md** → Advantage Estimators
-
-### Use Custom Dataset
-```python
-# my_dataset.py
-from torch.utils.data import Dataset
-
-class MyDataset(Dataset):
-    def __init__(self, data_files, tokenizer, config, **kwargs):
-        # Load data
-        self.data = load_from_files(data_files)
-
-    def __getitem__(self, idx):
-        return {...}
-```
-Config: `data.custom_cls.path=my_dataset.py data.custom_cls.name=MyDataset`
-
-See **references/environment.md** → Custom Datasets
+**For modifying VERL internals**, see component-specific guides below.
 
 ## File Locations Reference
 
@@ -257,7 +231,8 @@ Algorithm:
 
 ---
 
-**This skill references detailed documentation in four component guides:**
+**This skill provides:**
+- **[references/standalone.md](references/standalone.md)** - **START HERE**: 4 simple Python files for fast iteration
 - **[references/inference.md](references/inference.md)** - Inference engine selection and configuration
 - **[references/training.md](references/training.md)** - Policy loss and training optimization
 - **[references/environment.md](references/environment.md)** - Data pipeline and curriculum learning
