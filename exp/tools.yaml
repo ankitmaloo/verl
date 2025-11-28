@@ -1,0 +1,27 @@
+tools:
+  - name: calculator
+    description: Perform arithmetic operations
+    parameters:
+      - name: operation
+        type: string
+        description: "One of: add, subtract, multiply, divide"
+      - name: a
+        type: number
+        description: First number
+      - name: b
+        type: number
+        description: Second number
+
+  - name: search
+    description: Search for information
+    parameters:
+      - name: query
+        type: string
+        description: Search query
+
+  - name: get_weather
+    description: Get current weather for a location
+    parameters:
+      - name: location
+        type: string
+        description: City name

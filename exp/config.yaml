@@ -1,0 +1,50 @@
+# Model
+model_path: Qwen/Qwen2.5-0.5B-Instruct
+
+# Hardware
+num_gpus: 1
+
+# Training
+num_epochs: 10
+steps_per_epoch: 100
+batch_size: 8
+n_generations: 4
+save_every: 5
+
+# Inference (SGLang for multi-turn + tool calling)
+inference:
+  name: sglang
+  temperature: 0.7
+  top_p: 0.9
+  top_k: 50
+  max_response_length: 512
+  n: 4
+  # Multi-turn support
+  multi_turn: false
+  chat_template: chatml
+  # Tool calling
+  tools: tools.yaml
+
+# Training
+training:
+  actor:
+    strategy: fsdp
+    lr: 1e-6
+    max_grad_norm: 1.0
+    use_kl_loss: true
+    kl_loss_coef: 0.001
+  critic:
+    strategy: fsdp
+    lr: 1e-5
+
+# Algorithm
+algorithm:
+  adv_estimator: grpo
+  policy_loss_fn: ppo
+  gamma: 0.99
+  gae_lambda: 0.95
+
+# Reward
+reward:
+  custom_path: null
+  custom_name: null
