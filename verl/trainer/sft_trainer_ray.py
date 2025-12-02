@@ -24,6 +24,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "true"
 import logging
 
 import hydra
+import ray
 import torch
 import torch.distributed
 from omegaconf import OmegaConf
@@ -32,11 +33,10 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 
 from verl.utils import tensordict_utils as tu
-from verl.utils.checkpoint import CheckpointHandler
+from verl.utils.checkpoint import CheckpointHandler, OrchestrationMode
 from verl.utils.dataset.dataset_utils import SFTTensorCollator
 from verl.utils.dataset.multiturn_sft_dataset import MultiTurnSFTDataset
 from verl.utils.device import get_device_name
-from verl.utils.distributed import destroy_global_process_group
 from verl.utils.logger import log_with_rank
 from verl.utils.tracking import Tracking
 from verl.workers.engine_workers import TrainingWorker
@@ -52,17 +52,11 @@ class SFTTrainer:
     ):
         self.config = config
 
-        self.rank = torch.distributed.get_rank()
-
         self._build_config()
         self._build_dataset()
-
-        self._build_engine()
-
         self._build_dataloader()
 
-        self._init_engine()
-
+        self._build_engine()
         self._build_ckpt_handler()
 
         # Initialize resume-related variables
@@ -70,8 +64,7 @@ class SFTTrainer:
 
         self.device_name = self.config.trainer.device
 
-        if self.rank == 0:
-            print(self.config)
+        print(self.config)
 
     def _build_ckpt_handler(self):
         resume_mode = getattr(self.config.trainer, "resume_mode", "auto")
@@ -80,13 +73,14 @@ class SFTTrainer:
         default_hdfs_dir = getattr(self.config.trainer, "default_hdfs_dir", None)
 
         self.ckpt_handler = CheckpointHandler(
-            engine=self.engine,
+            engine=self.training_client,
             train_dataloader=self.train_dataloader,
             default_local_dir=self.config.trainer.default_local_dir,
             max_ckpt_to_keep=max_ckpt_to_keep,
             default_hdfs_dir=default_hdfs_dir,
             resume_mode=resume_mode,
             resume_from_path=resume_from_path,
+            mode=OrchestrationMode.RAY,
         )
 
     def _build_config(self):
@@ -111,30 +105,15 @@ class SFTTrainer:
             checkpoint_config=self.checkpoint_config,
         )
 
-        self.training_client = TrainingWorker(config=config)
+        # create resource pool and worker group
+        from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
+
+        n_gpus_per_node = self.config.trainer.n_gpus_per_node
+        nnodes = self.config.trainer.nnodes
+        self.resource_pool = RayResourcePool(process_on_nodes=[n_gpus_per_node] * nnodes)
+        ray_cls_with_init = RayClassWithInitArgs(ray.remote(TrainingWorker), config=config)
+        self.training_client = RayWorkerGroup(resource_pool=self.resource_pool, ray_cls_with_init=ray_cls_with_init)
         self.training_client.set_loss_fn(loss_fn=self.loss_fn)
-        # Note that in SPMD world, this abstraction has to break
-        self.engine = self.training_client.engine
-
-    def _init_engine(self):
-        # patch optimizer config
-        if self.config.trainer.total_training_steps is not None:
-            self.total_training_steps = self.config.trainer.total_training_steps
-        else:
-            self.total_training_steps = len(self.train_dataloader) * self.config.trainer.total_epochs
-        self.optimizer_config.total_training_steps = self.total_training_steps
-
-        self.steps_per_epoch = len(self.train_dataloader)
-
-        # manage save and test frequency
-        self.save_freq = self.config.trainer.save_freq
-        if self.save_freq == "after_each_epoch":
-            self.save_freq = self.steps_per_epoch
-
-        self.test_freq = self.config.trainer.test_freq
-        if self.test_freq == "after_each_epoch":
-            self.test_freq = self.steps_per_epoch
-
         self.training_client.reset()
 
     def _build_dataset(self):
@@ -161,8 +140,8 @@ class SFTTrainer:
         # Set pin_memory_device when pin_memory is enabled.
         device_name = get_device_name()
 
-        dp_rank = self.engine.get_data_parallel_rank()
-        dp_size = self.engine.get_data_parallel_size()
+        dp_rank = 0
+        dp_size = 1
 
         self.train_sampler = DistributedSampler(
             self.train_dataset, shuffle=True, num_replicas=dp_size, rank=dp_rank, drop_last=True
@@ -200,6 +179,24 @@ class SFTTrainer:
         else:
             self.val_dataloader = None
 
+        # update
+        if self.config.trainer.total_training_steps is not None:
+            self.total_training_steps = self.config.trainer.total_training_steps
+        else:
+            self.total_training_steps = len(self.train_dataloader) * self.config.trainer.total_epochs
+        self.optimizer_config.total_training_steps = self.total_training_steps
+
+        self.steps_per_epoch = len(self.train_dataloader)
+
+        # manage save and test frequency
+        self.save_freq = self.config.trainer.save_freq
+        if self.save_freq == "after_each_epoch":
+            self.save_freq = self.steps_per_epoch
+
+        self.test_freq = self.config.trainer.test_freq
+        if self.test_freq == "after_each_epoch":
+            self.test_freq = self.steps_per_epoch
+
     def _get_batch_seqlens(self, data):
         # mean over dp group
         is_nested = data["input_ids"].is_nested
@@ -207,34 +204,15 @@ class SFTTrainer:
             batch_seqlens: torch.Tensor = data["input_ids"].offsets().diff()
         else:
             batch_seqlens: torch.Tensor = data["attention_mask"].sum(dim=-1)
-        batch_seqlens = batch_seqlens.to(self.device_name)  # (global_bsz // dp)
-
-        output_tensor = torch.empty(
-            (batch_seqlens.shape[0] * self.engine.get_data_parallel_size(),),
-            dtype=batch_seqlens.dtype,
-            device=self.device_name,
-        )  # (global_bsz,)
-
-        torch.distributed.all_gather_into_tensor(
-            output_tensor=output_tensor,
-            input_tensor=batch_seqlens,
-            group=self.engine.get_data_parallel_group(),
-        )
-
-        batch_seqlens = output_tensor.tolist()
         return batch_seqlens
 
     def fit(self):
-        is_logging = self.engine.is_mp_src_rank_with_outputs() and self.engine.get_data_parallel_rank() == 0
-
-        # TODO: add a unified tracking
-        if is_logging:
-            tracking = Tracking(
-                project_name=self.config.trainer.project_name,
-                experiment_name=self.config.trainer.experiment_name,
-                default_backend=self.config.trainer.logger,
-                config=OmegaConf.to_container(self.config, resolve=True),
-            )
+        tracking = Tracking(
+            project_name=self.config.trainer.project_name,
+            experiment_name=self.config.trainer.experiment_name,
+            default_backend=self.config.trainer.logger,
+            config=OmegaConf.to_container(self.config, resolve=True),
+        )
 
         global_step = self.resume_global_step  # Start from resumed step
         last_valid_metric = None
@@ -281,38 +259,31 @@ class SFTTrainer:
                     initial=global_step % self.steps_per_epoch if epoch == start_epoch else 0,
                     total=self.steps_per_epoch,
                     desc=f"Epoch {epoch + 1}/{self.config.trainer.total_epochs}",
-                    disable=not is_logging,
                 )
             ):
                 global_step += 1
-
                 # construct tensordict
                 data = tu.get_tensordict(tensor_dict=data, non_tensor_dict=meta_info)
                 batch_seqlens = self._get_batch_seqlens(data=data)
                 # this is necessary. Otherwise, it is interpreted as NonTensorStack
-                batch_seqlens = NonTensorData(batch_seqlens)
+                batch_seqlens = NonTensorData(batch_seqlens.tolist())
 
                 tu.assign_non_tensor(data, update_lr_scheduler=True, global_token_num=batch_seqlens)
 
                 # train for on batch
-                output = self.training_client.train_batch(data=data)
+                output = self.training_client.train_batch(data)
 
-                if self.engine.is_mp_src_rank_with_outputs():
-                    metrics = tu.get(output, "metrics")
+                metrics = tu.get(output, "metrics")
 
-                    # TODO: we can actual accumulate metrics for N steps and perform aggregate metrics
-                    metrics["train/loss"] = metrics.pop("loss")
-                    metrics["train/grad_norm"] = metrics.pop("grad_norm")
-                    metrics["train/lr"] = metrics.pop("lr")
-                    metrics["train/mfu"] = metrics.pop("mfu")
-                    metrics["train/global_tokens"] = torch.sum(
-                        torch.tensor(batch_seqlens, device=self.device_name)
-                    ).item()
-                    total_tokens += metrics["train/global_tokens"]
-                    metrics["train/total_tokens(B)"] = total_tokens / 1e9
-
-                    if self.engine.get_data_parallel_rank() == 0:
-                        tracking.log(data=metrics, step=global_step)
+                # TODO: we can actual accumulate metrics for N steps and perform aggregate metrics
+                metrics["train/loss"] = metrics.pop("loss")
+                metrics["train/grad_norm"] = metrics.pop("grad_norm")
+                metrics["train/lr"] = metrics.pop("lr")
+                metrics["train/mfu"] = metrics.pop("mfu")
+                metrics["train/global_tokens"] = torch.sum(torch.tensor(batch_seqlens, device=self.device_name)).item()
+                total_tokens += metrics["train/global_tokens"]
+                metrics["train/total_tokens(B)"] = total_tokens / 1e9
+                tracking.log(data=metrics, step=global_step)
 
                 is_last_step = global_step >= self.total_training_steps
                 is_valid_step = global_step % self.test_freq == 0
@@ -325,41 +296,28 @@ class SFTTrainer:
                     for val_data in self.val_dataloader:
                         val_data = tu.get_tensordict(tensor_dict=val_data, non_tensor_dict=meta_info)
                         output = self.training_client.infer_batch(val_data)
+                        metrics = tu.get(output, "metrics")
+                        val_losses.append(metrics["loss"])
 
-                        if self.engine.is_mp_src_rank_with_outputs():
-                            metrics = tu.get(output, "metrics")
-                            val_losses.append(metrics["loss"])
+                    val_loss = torch.mean(torch.tensor(val_losses, device=self.device_name))
 
-                    if self.engine.is_mp_src_rank_with_outputs():
-                        val_loss = torch.mean(torch.tensor(val_losses, device=self.device_name))
-                        # average over data parallel group
-                        torch.distributed.all_reduce(
-                            val_loss, op=torch.distributed.ReduceOp.AVG, group=self.engine.get_data_parallel_group()
-                        )
-
-                    if is_logging:
-                        metric = {"val/loss": val_loss.detach().item()}
-                        tracking.log(data=metric, step=global_step)
-                        last_valid_metric = metric
-                    torch.distributed.barrier()
+                    metric = {"val/loss": val_loss.detach().item()}
+                    tracking.log(data=metric, step=global_step)
+                    last_valid_metric = metric
 
                 if is_last_step or (self.save_freq > 0 and is_save_step):
                     self.ckpt_handler.save_checkpoint(step=global_step)
 
                 if is_last_step:
-                    if is_logging:
-                        print(f"Total time for train steps: {train_time:.2f}s")
-                        print(f"Final validation metrics: {last_valid_metric}")
+                    print(f"Total time for train steps: {train_time:.2f}s")
+                    print(f"Final validation metrics: {last_valid_metric}")
                     return
 
 
 def run_sft(config):
-    from verl.utils.distributed import initialize_global_process_group
-
-    initialize_global_process_group()
+    ray.init()
     trainer = SFTTrainer(config=config)
     trainer.fit()
-    destroy_global_process_group()
 
 
 @hydra.main(config_path="config", config_name="sft_trainer_engine", version_base=None)
