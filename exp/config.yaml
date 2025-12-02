@@ -11,6 +11,19 @@ batch_size: 8
 n_generations: 4
 save_every: 5
 
+# Game
+game:
+  name: password
+  max_turns: 50
+
+# Logging
+wandb:
+  project: verl-games
+  name: null
+
+# HuggingFace (set to upload after training)
+hf_repo: null
+
 # Inference (SGLang for multi-turn + tool calling)
 inference:
   name: sglang

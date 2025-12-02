@@ -183,6 +183,28 @@ class PasswordGame:
         self.moon_phase = get_current_moon_phase()
         self.password_history = []
 
+    def parse_response(self, response: str) -> tuple:
+        """Parse password game response format."""
+        return parse_resp(response)
+
+    def get_initial_prompt(self) -> str:
+        """Return initial prompt for this game instance."""
+        state = self.step()
+        return state["instructions"] + "\n\nRule: " + state["current_rule"]
+
+    def format_observation(self, result: dict) -> str:
+        """Format game state as observation."""
+        if "all_rules" in result:
+            return "Rules:\n" + "\n".join(
+                f"{i+1}. {r}" for i, r in enumerate(result["all_rules"])
+            )
+        return str(result)
+
+    @property
+    def attempts(self) -> list:
+        """Alias for password_history."""
+        return self.password_history
+
 
     def get_current_rule(self) -> Optional[str]:
         if self.current_rule >= len(rules) or not self.game_active:

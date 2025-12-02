@@ -1,27 +1,38 @@
 tools:
-  - name: calculator
-    description: Perform arithmetic operations
-    parameters:
-      - name: operation
-        type: string
-        description: "One of: add, subtract, multiply, divide"
-      - name: a
-        type: number
-        description: First number
-      - name: b
-        type: number
-        description: Second number
+  - type: function
+    function:
+      name: calculator
+      description: Perform arithmetic operations
+      parameters:
+        type: object
+        properties:
+          operation:
+            type: string
+            enum: [add, subtract, multiply, divide]
+          a:
+            type: number
+          b:
+            type: number
+        required: [operation, a, b]
 
-  - name: search
-    description: Search for information
-    parameters:
-      - name: query
-        type: string
-        description: Search query
+  - type: function
+    function:
+      name: search
+      description: Search for information
+      parameters:
+        type: object
+        properties:
+          query:
+            type: string
+        required: [query]
 
-  - name: get_weather
-    description: Get current weather for a location
-    parameters:
-      - name: location
-        type: string
-        description: City name
+  - type: function
+    function:
+      name: get_weather
+      description: Get current weather for a location
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+        required: [location]

@@ -1,75 +1,73 @@
-"""Data source. Modify this file for different tasks."""
+"""Generic environment that manages a batch of games."""
 
-# Example data - replace with your dataset
-PROMPTS = [
-    "What is 2 + 2?",
-    "What is 5 * 3?",
-    "What is 10 - 4?",
-    "What is 12 / 3?",
-    "What is 7 + 8?",
-    "What is 9 * 2?",
-    "What is 20 - 11?",
-    "What is 15 / 5?",
-]
-
-ANSWERS = ["4", "15", "6", "4", "15", "18", "9", "3"]
-
-current_idx = 0
+from tools import process_response_with_tools, format_tool_result
 
 
-def get_batch(size=8):
-    """Get next batch of prompts."""
-    global current_idx
+class Env:
+    """
+    Manages a batch of game instances.
+    Completely generic - knows nothing about specific game types.
+    Games implement their own parse_response() and format_observation().
+    """
 
-    indices = [(current_idx + i) % len(PROMPTS) for i in range(size)]
-    current_idx = (current_idx + size) % len(PROMPTS)
+    def __init__(self, games: list):
+        """
+        Args:
+            games: List of game instances (must implement BaseGame interface)
+        """
+        self.games = games
+        self.size = len(games)
+        self.convs = [[] for _ in range(self.size)]
+        self.active = [True] * self.size
+        self._init()
 
-    return {
-        'prompts': [PROMPTS[i] for i in indices],
-        'ground_truths': [ANSWERS[i] for i in indices],
-    }
+    def _init(self):
+        for i, g in enumerate(self.games):
+            prompt = g.get_initial_prompt()
+            self.convs[i] = [{"role": "user", "content": prompt}]
 
+    def get_prompts(self):
+        """Returns conversation histories for active games, None for finished."""
+        return [self.convs[i] if self.active[i] else None for i in range(self.size)]
 
-# For multi-turn, return prompts as message lists:
-# def get_batch(size=8):
-#     return {
-#         'prompts': [
-#             [
-#                 {'role': 'user', 'content': 'What is 2+2?'},
-#                 {'role': 'assistant', 'content': 'The answer is 4.'},
-#                 {'role': 'user', 'content': 'Now multiply that by 3.'},
-#             ]
-#         ] * size,
-#         'ground_truths': ['12'] * size,
-#     }
+    def step(self, responses):
+        """
+        Process model responses for all games.
+        responses[i] should be None for finished games.
+        """
+        for i, resp in enumerate(responses):
+            if not self.active[i] or resp is None:
+                continue
 
+            self.convs[i].append({"role": "assistant", "content": resp})
 
-# For tool calling, prompts that require tool use:
-# TOOL_PROMPTS = [
-#     "What is 15 + 27? Use the calculator tool.",
-#     "What is 100 divided by 4? Use the calculator.",
-#     "Search for information about Python programming.",
-#     "What's the weather in Tokyo?",
-# ]
-# TOOL_ANSWERS = ["42", "25", None, None]  # None = no exact answer, reward based on tool usage
-#
-# def get_batch(size=4):
-#     return {
-#         'prompts': TOOL_PROMPTS[:size],
-#         'ground_truths': TOOL_ANSWERS[:size],
-#     }
-#
-# def compute_reward(responses, ground_truths):
-#     """Reward for correct tool usage."""
-#     import re
-#     rewards = []
-#     for resp, gt in zip(responses, ground_truths):
-#         # Check if model called a tool
-#         has_tool_call = bool(re.search(r'<tool_call>|<function>', resp, re.IGNORECASE))
-#         if gt:
-#             # If we have ground truth, check answer
-#             rewards.append(1.0 if str(gt) in resp else 0.0)
-#         else:
-#             # No ground truth, reward tool usage
-#             rewards.append(1.0 if has_tool_call else 0.0)
-#     return rewards
+            # Check for tool calls first
+            has_tool, tool_name, _, tool_result = process_response_with_tools(resp)
+            if has_tool:
+                self.convs[i].append(format_tool_result(tool_name, tool_result))
+                continue
+
+            # Delegate parsing to game
+            action, give_up = self.games[i].parse_response(resp)
+            result = self.games[i].step(action or "", give_up or False)
+
+            if result.get("game_ended"):
+                self.active[i] = False
+                self.convs[i].append({
+                    "role": "system",
+                    "content": f"Game ended. Reward: {result.get('reward', 0)}"
+                })
+            else:
+                obs = self.games[i].format_observation(result)
+                self.convs[i].append({"role": "user", "content": obs})
+
+    def done(self):
+        """Returns True when all games are finished."""
+        return not any(self.active)
+
+    def get_batch(self):
+        """Returns batch data for training."""
+        return {
+            'prompts': self.convs,
+            'games': self.games,
+        }
