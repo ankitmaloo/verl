@@ -1,0 +1,46 @@
+# VERL Inference Configuration
+# Single config file for InferenceEngine
+
+# Model settings
+model_path: "Qwen/Qwen3-0.6B"
+trust_remote_code: false
+
+# Backend: "sglang" or "vllm"
+backend: "sglang"
+
+# GPU settings
+num_gpus: 1  # Number of GPUs to use (tensor parallelism = num_gpus)
+gpu_memory_utilization: 0.8
+dtype: "auto"
+
+# Sequence lengths
+max_prompt_length: 2048
+max_response_length: 512
+
+# Sampling parameters
+temperature: 1.0
+top_p: 1.0
+top_k: -1
+do_sample: true
+n: 1  # completions per prompt
+return_logprobs: false  # Whether to return log probabilities
+
+# Multi-turn conversation settings
+multi_turn:
+  enable: false
+  max_turns: 10
+  tool_config_path: null  # Path to tool config yaml, e.g., "./tool_config.yaml"
+
+# Engine settings
+enforce_eager: true
+free_cache_engine: true
+
+# Evaluation settings
+eval:
+  num_samples: null  # null = all samples
+  batch_size: 1
+
+# Wandb settings (runs offline/local if no API key)
+wandb:
+  project: "gsm8k-eval"
+  run_name: null
