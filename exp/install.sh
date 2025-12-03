@@ -97,11 +97,13 @@ uv pip install pyyaml wandb huggingface_hub datasets
 echo ""
 echo "=== Verifying installation ==="
 
-python3 -c "import torch; print(f'PyTorch {torch.__version__}')" && check_pass "torch" || check_fail "torch import failed"
-python3 -c "import torch; assert torch.cuda.is_available(), 'no cuda'; print(f'CUDA devices: {torch.cuda.device_count()}')" && check_pass "torch.cuda" || check_warn "CUDA not available in PyTorch"
-python3 -c "import verl; print('verl ok')" && check_pass "verl" || check_fail "verl import failed"
-python3 -c "import sglang; print('sglang ok')" && check_pass "sglang" || check_warn "sglang import failed"
-python3 -c "import wandb; print('wandb ok')" && check_pass "wandb" || check_fail "wandb import failed"
+VENV_PYTHON="$SCRIPT_DIR/.venv/bin/python"
+
+$VENV_PYTHON -c "import torch; print(f'PyTorch {torch.__version__}')" && check_pass "torch" || check_fail "torch import failed"
+$VENV_PYTHON -c "import torch; assert torch.cuda.is_available(), 'no cuda'; print(f'CUDA devices: {torch.cuda.device_count()}')" && check_pass "torch.cuda" || check_warn "CUDA not available in PyTorch"
+$VENV_PYTHON -c "import verl; print('verl ok')" && check_pass "verl" || check_fail "verl import failed"
+$VENV_PYTHON -c "import sglang; print('sglang ok')" && check_pass "sglang" || check_warn "sglang import failed"
+$VENV_PYTHON -c "import wandb; print('wandb ok')" && check_pass "wandb" || check_fail "wandb import failed"
 
 echo ""
 echo "=== Done ==="
