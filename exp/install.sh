@@ -84,20 +84,17 @@ else
     check_pass "venv created"
 fi
 
-echo "Activating venv..."
-source .venv/bin/activate
+VENV_PYTHON="$SCRIPT_DIR/.venv/bin/python"
 
 echo "Installing verl..."
-uv pip install -e "$VERL_DIR[sglang]"
+uv pip install --python "$VENV_PYTHON" -e "$VERL_DIR[sglang]"
 
 echo "Installing dependencies..."
-uv pip install pyyaml wandb huggingface_hub datasets
+uv pip install --python "$VENV_PYTHON" pyyaml wandb huggingface_hub datasets
 
 # Verify imports
 echo ""
 echo "=== Verifying installation ==="
-
-VENV_PYTHON="$SCRIPT_DIR/.venv/bin/python"
 
 $VENV_PYTHON -c "import torch; print(f'PyTorch {torch.__version__}')" && check_pass "torch" || check_fail "torch import failed"
 $VENV_PYTHON -c "import torch; assert torch.cuda.is_available(), 'no cuda'; print(f'CUDA devices: {torch.cuda.device_count()}')" && check_pass "torch.cuda" || check_warn "CUDA not available in PyTorch"
