@@ -1,46 +1,110 @@
-# VERL Inference Configuration
-# Single config file for InferenceEngine
+# VERL SGLang Async Rollout Configuration
+# Single GPU inference/rollout setup
 
-# Model settings
+# ============================================================================
+# Model Settings
+# ============================================================================
 model_path: "Qwen/Qwen3-0.6B"
 trust_remote_code: false
 
-# Backend: "sglang" or "vllm"
-backend: "sglang"
+# ============================================================================
+# Rollout Backend Configuration
+# ============================================================================
+rollout:
+  # Core async mode settings (REQUIRED)
+  name: sglang                      # Use SGLang backend
+  mode: async                       # Use async mode (NOT "sync")
+  skip_tokenizer_init: true         # REQUIRED for async (token-in-token-out)
+  
+  # Sequence length settings
+  prompt_length: 2048               # Max prompt length
+  response_length: 512              # Max response/generation length
+  max_model_len: null               # Auto-calculated as prompt_length + response_length
+  max_num_seqs: 1024                # Max number of sequences SGLang can handle
+  max_num_batched_tokens: 8192      # Max tokens in a batch
+  
+  # Sampling parameters (training)
+  temperature: 1.0                  # Sampling temperature
+  top_k: -1                         # Top-k sampling (-1 = disabled)
+  top_p: 1.0                        # Top-p (nucleus) sampling
+  do_sample: true                   # Enable sampling (false = greedy)
+  n: 1                              # Number of completions per prompt
+  ignore_eos: false                 # Continue after EOS token
+  
+  # Validation sampling (different from training)
+  val_kwargs:
+    temperature: 0                  # Greedy for validation
+    top_k: -1
+    top_p: 1.0
+    do_sample: false
+    n: 1
+  
+  # GPU & parallelism (1 GPU setup)
+  tensor_model_parallel_size: 1     # Tensor parallel - MUST be 1 for single GPU
+  data_parallel_size: 1             # Data parallel
+  expert_parallel_size: 1           # Expert parallel (for MoE models)
+  pipeline_model_parallel_size: 1   # Pipeline parallel
+  
+  # Memory & performance
+  gpu_memory_utilization: 0.5       # Fraction of GPU memory for KV cache
+  dtype: bfloat16                   # Model precision (bfloat16/float16/float32)
+  free_cache_engine: true           # Free KV cache after generation
+  enforce_eager: false              # false = use CUDA graphs (faster), true = eager mode
+  cudagraph_capture_sizes: null     # Batch sizes to capture (null = auto)
+  
+  # Performance optimizations
+  enable_chunked_prefill: true      # Better throughput for long prompts
+  enable_prefix_caching: true       # Cache common prefixes
+  
+  # Model loading
+  load_format: dummy                # "dummy" for random init, "auto" for real weights
+  
+  # SGLang engine-specific settings
+  engine_kwargs:
+    sglang:
+      attention_backend: fa3        # FlashAttention v3 (default)
+      # Add other SGLang-specific args here if needed
+  
+  # Logging & debugging
+  calculate_log_probs: false        # Calculate token log probs (for PPO/debugging)
+  disable_log_stats: true           # Disable verbose logging
+  
+  # Advanced settings
+  over_sample_rate: 0.0             # Early stopping: abort when (1 - rate) * requests complete
+  update_weights_bucket_megabytes: 512  # Batch size for weight updates (online training)
+  multi_stage_wake_up: false        # Reduce peak memory during train/rollout switch
+  
+  # Multi-turn & tool calling (optional)
+  multi_turn:
+    enable: false                   # Enable multi-turn conversations
+    max_assistant_turns: null       # Max tool calls/turns (null = auto)
+    max_user_turns: null            # Max user interactions
+    tool_config_path: null          # Path to tool definitions YAML
+    max_parallel_calls: 1           # Max parallel tool calls per turn
+    max_tool_response_length: 512   # Max tokens from tool responses
+    tool_response_truncate_side: middle  # How to truncate: left/middle/right
+    interaction_config_path: null   # Custom interaction handlers
+    use_inference_chat_template: false  # Use model's chat template
+    tokenization_sanity_check_mode: strict  # strict/disable/ignore_strippable
+    format: hermes                  # Multi-turn format: hermes/llama3_json
+  
+  # Caching & debugging
+  skip_rollout: false               # Load cached rollouts instead of computing
+  skip_dump_dir: /tmp/rollout_dump  # Where to cache rollouts
+  
+  # Profiling (optional)
+  profiler: null                    # Set to profile GPU usage
 
-# GPU settings
-num_gpus: 1  # Number of GPUs to use (tensor parallelism = num_gpus)
-gpu_memory_utilization: 0.8
-dtype: "auto"
-
-# Sequence lengths
-max_prompt_length: 2048
-max_response_length: 512
-
-# Sampling parameters
-temperature: 1.0
-top_p: 1.0
-top_k: -1
-do_sample: true
-n: 1  # completions per prompt
-return_logprobs: false  # Whether to return log probabilities
-
-# Multi-turn conversation settings
-multi_turn:
-  enable: false
-  max_turns: 10
-  tool_config_path: null  # Path to tool config yaml, e.g., "./tool_config.yaml"
-
-# Engine settings
-enforce_eager: true
-free_cache_engine: true
-
-# Evaluation settings
+# ============================================================================
+# Evaluation Settings
+# ============================================================================
 eval:
-  num_samples: null  # null = all samples
+  num_samples: null                 # null = all samples
   batch_size: 1
 
-# Wandb settings (runs offline/local if no API key)
+# ============================================================================
+# Logging (Wandb)
+# ============================================================================
 wandb:
   project: "gsm8k-eval"
   run_name: null

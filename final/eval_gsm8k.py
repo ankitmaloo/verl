@@ -13,7 +13,7 @@ from tqdm import tqdm
 from datasets import load_dataset
 import wandb
 
-from inference import InferenceEngine
+from inf import InferenceEngine
 
 CONFIG_PATH = "final/config.yaml"
 
