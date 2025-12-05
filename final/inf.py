@@ -90,6 +90,10 @@ class InferenceEngine:
         if not rollout_cfg:
             rollout_cfg = self.config
         
+        # Store resolved prompt/response lengths for consistent use
+        self._prompt_length = rollout_cfg.get("prompt_length", self.config.get("max_prompt_length", 2048))
+        self._response_length = rollout_cfg.get("response_length", self.config.get("max_response_length", 512))
+        
         rollout_dict = {
             # Core async mode settings (REQUIRED)
             "name": rollout_cfg.get("name", "sglang"),
@@ -97,8 +101,8 @@ class InferenceEngine:
             "skip_tokenizer_init": rollout_cfg.get("skip_tokenizer_init", True),
             
             # Sequence length settings
-            "prompt_length": rollout_cfg.get("prompt_length", self.config.get("max_prompt_length", 2048)),
-            "response_length": rollout_cfg.get("response_length", self.config.get("max_response_length", 512)),
+            "prompt_length": self._prompt_length,
+            "response_length": self._response_length,
             "max_model_len": rollout_cfg.get("max_model_len"),
             "max_num_seqs": rollout_cfg.get("max_num_seqs", 1024),
             "max_num_batched_tokens": rollout_cfg.get("max_num_batched_tokens", 8192),
@@ -143,8 +147,8 @@ class InferenceEngine:
             "enable_chunked_prefill": rollout_cfg.get("enable_chunked_prefill", True),
             "enable_prefix_caching": rollout_cfg.get("enable_prefix_caching", True),
             
-            # Model loading
-            "load_format": rollout_cfg.get("load_format", "dummy"),
+            # Model loading - IMPORTANT: default to "auto" for real weights!
+            "load_format": rollout_cfg.get("load_format", "auto"),
             
             # SGLang engine kwargs
             "engine_kwargs": rollout_cfg.get("engine_kwargs", {}),
@@ -217,11 +221,19 @@ class InferenceEngine:
         return normalized
 
     def _build_dataproto(self, messages: List[List[Message]]) -> DataProto:
+        # Use processor if it has apply_chat_template, otherwise fall back to tokenizer
+        template_fn = getattr(self.processor, 'apply_chat_template', None)
+        if template_fn is None:
+            template_fn = getattr(self.tokenizer, 'apply_chat_template', None)
+        if template_fn is None:
+            raise ValueError("Neither processor nor tokenizer has apply_chat_template method")
+        
         chat_texts = [
-            self.processor.apply_chat_template(msgs, add_generation_prompt=True, tokenize=False)
+            template_fn(msgs, add_generation_prompt=True, tokenize=False)
             for msgs in messages
         ]
-        prompt_len = self.config.get("max_prompt_length", 2048)
+        # Use the resolved prompt_length from rollout config for consistency
+        prompt_len = getattr(self, '_prompt_length', self.config.get("max_prompt_length", 2048))
         tokenized = self.tokenizer(
             chat_texts,
             return_tensors="pt",
@@ -262,11 +274,13 @@ class InferenceEngine:
         return data
 
     def _sampling_kwargs(self, **overrides) -> tuple[Dict[str, Any], Optional[bool]]:
+        # Use resolved response_length for consistency
+        response_len = getattr(self, '_response_length', self.config.get("max_response_length", 512))
         params = {
             "temperature": overrides.get("temperature", self.config.get("temperature", 1.0)),
             "top_p": overrides.get("top_p", self.config.get("top_p", 1.0)),
             "top_k": overrides.get("top_k", self.config.get("top_k", -1)),
-            "max_new_tokens": overrides.get("max_tokens", self.config.get("max_response_length", 512)),
+            "max_new_tokens": overrides.get("max_tokens", response_len),
         }
         do_sample = overrides.get("do_sample")
         if do_sample is False:
@@ -321,5 +335,12 @@ class InferenceEngine:
         return GenerationOutput(completions=completions, token_ids=token_ids, metadata=metadata)
 
     def shutdown(self):
-        # Best-effort cleanup; rollout handles engine teardown internally.
-        pass
+        """Best-effort cleanup of the inference engine."""
+        try:
+            if hasattr(self.rollout, '_engine') and self.rollout._engine is not None:
+                import asyncio
+                loop = asyncio.get_event_loop()
+                if hasattr(self.rollout._engine, 'shutdown'):
+                    loop.run_until_complete(self.rollout._engine.shutdown())
+        except Exception:
+            pass  # Ignore cleanup errors

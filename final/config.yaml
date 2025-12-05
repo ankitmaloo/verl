@@ -57,7 +57,7 @@ rollout:
   enable_prefix_caching: true       # Cache common prefixes
   
   # Model loading
-  load_format: dummy                # "dummy" for random init, "auto" for real weights
+  load_format: auto                 # "auto" for real weights, "dummy" for random init (testing only)
   
   # SGLang engine-specific settings
   engine_kwargs:
