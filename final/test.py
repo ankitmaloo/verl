@@ -277,6 +277,17 @@ class InferenceTests:
 
         return True, "Metadata present", details
 
+    def teardown(self):
+        """Cleanup engine and release resources."""
+        if self.engine is not None:
+            self.engine.shutdown()
+            self.engine = None
+        import torch
+        import torch.distributed as dist
+        if dist.is_initialized():
+            dist.destroy_process_group()
+        torch.cuda.empty_cache()
+
 
 def run_quick_test(config_path: str, verbose: bool) -> bool:
     """Run a quick smoke test to verify basic functionality."""
@@ -299,6 +310,7 @@ def run_quick_test(config_path: str, verbose: bool) -> bool:
     results.append(result)
     print_test_result(result, verbose)
 
+    tests.teardown()
     passed = all(r.passed for r in results)
     return passed
 
@@ -353,6 +365,7 @@ def run_full_test_suite(config_path: str, verbose: bool) -> bool:
             if not r.passed:
                 print(f"    - {r.name}: {r.message}")
 
+    tests.teardown()
     return failed == 0
 
 

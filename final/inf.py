@@ -46,7 +46,11 @@ def _ensure_dist_initialized():
     devices_keyword = get_visible_devices_keyword()
     os.environ.setdefault(devices_keyword, "0")
     os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
-    os.environ.setdefault("MASTER_PORT", "29500")
+    if "MASTER_PORT" not in os.environ:
+        import socket
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(('', 0))
+            os.environ["MASTER_PORT"] = str(s.getsockname()[1])
     backend = "nccl" if torch.cuda.is_available() else "gloo"
     dist.init_process_group(backend=backend, rank=0, world_size=1)
 
