@@ -294,6 +294,9 @@ class vLLMHttpServerBase:
                 }
             )
 
+        if self.config.enable_rollout_routing_replay:
+            args.update({"enable_return_routed_experts": True})
+
         server_args = ["serve", self.model_config.local_path]
         for k, v in args.items():
             if isinstance(v, bool):
@@ -430,7 +433,12 @@ class vLLMHttpServerBase:
         log_probs = None
         if sampling_params.logprobs is not None:
             log_probs = [logprobs[token_ids[i]].logprob for i, logprobs in enumerate(final_res.outputs[0].logprobs)]
-        return TokenOutput(token_ids=token_ids, log_probs=log_probs)
+
+        routed_experts = None
+        if self.config.enable_rollout_routing_replay:
+            routed_experts = final_res.outputs[0].routed_experts
+
+        return TokenOutput(token_ids=token_ids, log_probs=log_probs, routed_experts=routed_experts)
 
     async def wake_up(self):
         if self.rollout_mode == RolloutMode.HYBRID:
@@ -454,6 +462,10 @@ class vLLMHttpServerBase:
                 await self.engine.sleep(level=1)
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip sleep in standalone mode")
+
+    async def clear_kv_cache(self):
+        if self.node_rank == 0:
+            await self.engine.reset_prefix_cache()
 
     async def wait_for_requests_to_drain(self):
         await self.engine.wait_for_requests_to_drain()
