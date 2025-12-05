@@ -47,7 +47,7 @@ rollout:
   
   # Memory & performance
   gpu_memory_utilization: 0.5       # Fraction of GPU memory for KV cache
-  dtype: bfloat16                   # Model precision (bfloat16/float16/float32)
+  dtype: auto                   # Model precision (bfloat16/float16/float32)
   free_cache_engine: true           # Free KV cache after generation
   enforce_eager: false              # false = use CUDA graphs (faster), true = eager mode
   cudagraph_capture_sizes: null     # Batch sizes to capture (null = auto)

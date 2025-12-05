@@ -71,7 +71,7 @@ class InferenceEngine:
         self.processor = self.model_config.get_processor()
 
         # Set environment variable required by SGLang for tensor parallelism
-        os.environ.setdefault("SGL_DISABLE_TP_MEMORY_INBALANCE_CHECK", "True")
+        os.environ.setdefault("SGLANG_DISABLE_TP_MEMORY_INBALANCE_CHECK", "True")
 
         rollout_conf = self._build_rollout_config()
         self.rollout = SGLangRollout(
