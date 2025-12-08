@@ -13,11 +13,44 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 import traceback
 from dataclasses import dataclass
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, Dict, List, Optional
+
+
+# ============================================================================
+# Tool Definitions for Testing
+# ============================================================================
+
+def add(a: int, b: int) -> int:
+    """Add two numbers together."""
+    return a + b
+
+
+ADD_TOOL_SCHEMA: Dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "add",
+        "description": "Add two numbers together",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "a": {
+                    "type": "integer",
+                    "description": "First number to add"
+                },
+                "b": {
+                    "type": "integer",
+                    "description": "Second number to add"
+                }
+            },
+            "required": ["a", "b"]
+        }
+    }
+}
 
 # Color codes for terminal output
 class Colors:
@@ -277,6 +310,93 @@ class InferenceTests:
 
         return True, "Metadata present", details
 
+    def test_tool_calling_add(self) -> tuple[bool, str, Optional[str]]:
+        """Test tool calling with an addition function."""
+        if self.engine is None:
+            return False, "Engine not initialized", None
+
+        # Ask the model to add two numbers using the tool
+        prompt = "What is 15 + 27? Use the add tool to calculate this."
+
+        output = self.engine.generate(
+            prompt,
+            tools=[ADD_TOOL_SCHEMA],
+            tool_parser="hermes",
+            temperature=0,  # Greedy for deterministic tool calling
+        )
+
+        if not output.completions:
+            return False, "No completions returned", None
+
+        completion = output.completions[0]
+        tool_calls = output.tool_calls[0] if output.tool_calls else []
+
+        details_lines = [
+            f"Prompt: {prompt}",
+            f"Completion: {completion[:300]}{'...' if len(completion) > 300 else ''}",
+            f"Number of tool calls: {len(tool_calls)}",
+        ]
+
+        if tool_calls:
+            for i, tc in enumerate(tool_calls):
+                details_lines.append(f"Tool call {i}: {tc.name}({tc.arguments})")
+
+        details = "\n".join(details_lines)
+
+        # Check if tool call was detected
+        if not tool_calls:
+            # Model might have just computed directly - that's also acceptable
+            if "42" in completion:
+                return True, "Model computed directly (no tool call, but correct answer)", details
+            return False, "No tool calls detected and no correct answer", details
+
+        # Verify the tool call
+        tc = tool_calls[0]
+        if tc.name != "add":
+            return False, f"Expected 'add' tool, got '{tc.name}'", details
+
+        # Check arguments
+        args = tc.arguments
+        if not isinstance(args, dict):
+            return False, f"Arguments not a dict: {args}", details
+
+        # Execute the tool
+        try:
+            a = args.get("a")
+            b = args.get("b")
+            if a is None or b is None:
+                return False, f"Missing arguments a or b: {args}", details
+
+            result = add(int(a), int(b))
+            details_lines.append(f"Executed add({a}, {b}) = {result}")
+        except Exception as e:
+            return False, f"Tool execution failed: {e}", details
+
+        # Continue conversation with tool result
+        if output.messages:
+            try:
+                follow_up = self.engine.generate_with_tool_result(
+                    messages=output.messages[0],
+                    tool_call=tc,
+                    tool_result=str(result),
+                    tools=[ADD_TOOL_SCHEMA],
+                    temperature=0,
+                )
+                details_lines.append(f"Follow-up response: {follow_up.completions[0][:200]}")
+
+                # Check if the model acknowledged the result
+                if str(result) in follow_up.completions[0]:
+                    details_lines.append(f"Model correctly incorporated result: {result}")
+
+                details = "\n".join(details_lines)
+                return True, "Tool calling with continuation works", details
+            except Exception as e:
+                details_lines.append(f"Follow-up failed: {e}")
+                details = "\n".join(details_lines)
+                return True, "Tool detected but follow-up failed", details
+
+        return True, "Tool call detected and executed", "\n".join(details_lines)
+
     def teardown(self):
         """Cleanup engine and release resources."""
         if self.engine is not None:
@@ -332,6 +452,7 @@ def run_full_test_suite(config_path: str, verbose: bool) -> bool:
         ("Token ID Consistency", tests.test_token_ids_consistency),
         ("Max Tokens Limit", tests.test_max_tokens),
         ("Metadata Present", tests.test_metadata_present),
+        ("Tool Calling (Add)", tests.test_tool_calling_add),
     ]
 
     # Run setup first

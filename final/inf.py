@@ -2,12 +2,15 @@
 
 Supports nested config (rollout.*) and flat config (backwards compatible).
 Uses VERL's SGLangRollout in async mode for optimal performance.
+Includes basic tool calling support via VERL's ToolParser.
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Union
 
 import numpy as np
@@ -17,6 +20,7 @@ from omegaconf import OmegaConf
 from tensordict import TensorDict
 
 from verl import DataProto
+from verl.experimental.agent_loop.tool_parser import FunctionCall, ToolParser
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_visible_devices_keyword
 from verl.utils.model import compute_position_id_with_mask
@@ -25,13 +29,35 @@ from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.sglang_rollout.sglang_rollout import SGLangRollout
 
 Message = Dict[str, Any]
+Tool = Dict[str, Any]  # OpenAI-format tool definition
+
+
+@dataclass
+class ToolCall:
+    """Represents a tool call detected in model output."""
+    name: str
+    arguments: Dict[str, Any]  # Parsed JSON arguments
+    raw_arguments: str  # Original JSON string from model
+
+    @classmethod
+    def from_function_call(cls, fc: FunctionCall) -> "ToolCall":
+        """Convert VERL's FunctionCall to ToolCall."""
+        try:
+            args = json.loads(fc.arguments)
+        except json.JSONDecodeError:
+            args = {}
+        return cls(name=fc.name, arguments=args, raw_arguments=fc.arguments)
 
 
 @dataclass
 class GenerationOutput:
+    """Output from generation, including tool calls if detected."""
     completions: List[str]
     token_ids: List[List[int]]
     metadata: Optional[List[Dict[str, Any]]] = None
+    # Tool calling support
+    tool_calls: Optional[List[List[ToolCall]]] = None  # Per-completion tool calls
+    messages: Optional[List[List[Message]]] = None  # Conversation history for continuation
 
 
 def _ensure_dist_initialized():
@@ -224,16 +250,25 @@ class InferenceEngine:
                 normalized.append(item)
         return normalized
 
-    def _build_dataproto(self, messages: List[List[Message]]) -> DataProto:
+    def _build_dataproto(
+        self,
+        messages: List[List[Message]],
+        tools: Optional[List[Tool]] = None
+    ) -> DataProto:
         # Use processor if it has apply_chat_template, otherwise fall back to tokenizer
         template_fn = getattr(self.processor, 'apply_chat_template', None)
         if template_fn is None:
             template_fn = getattr(self.tokenizer, 'apply_chat_template', None)
         if template_fn is None:
             raise ValueError("Neither processor nor tokenizer has apply_chat_template method")
-        
+
+        # Build chat template kwargs - include tools if provided
+        template_kwargs = {"add_generation_prompt": True, "tokenize": False}
+        if tools:
+            template_kwargs["tools"] = tools
+
         chat_texts = [
-            template_fn(msgs, add_generation_prompt=True, tokenize=False)
+            template_fn(msgs, **template_kwargs)
             for msgs in messages
         ]
         # Use the resolved prompt_length from rollout config for consistency
@@ -294,18 +329,43 @@ class InferenceEngine:
     def generate(
         self,
         prompts: Union[str, Dict[str, Any], Sequence[Union[str, List[Message]]]],
+        tools: Optional[List[Tool]] = None,
+        tool_parser: str = "hermes",
         **kwargs,
     ) -> GenerationOutput:
+        """Generate completions, optionally with tool calling support.
+
+        Args:
+            prompts: Input prompts (string, list of strings, or list of message lists)
+            tools: Optional list of tool definitions in OpenAI format:
+                   [{"type": "function", "function": {"name": "...", "description": "...", "parameters": {...}}}]
+            tool_parser: Parser format for detecting tool calls ("hermes" or "gpt-oss")
+            **kwargs: Sampling parameters (temperature, top_p, top_k, max_tokens, do_sample)
+
+        Returns:
+            GenerationOutput with completions, token_ids, and tool_calls (if tools provided)
+        """
         message_batches = self._normalize_prompts(prompts)
-        data_proto = self._build_dataproto(message_batches)
+        data_proto = self._build_dataproto(message_batches, tools=tools)
         sampling_params, do_sample = self._sampling_kwargs(**kwargs)
         if do_sample is not None:
             data_proto.meta_info["do_sample"] = do_sample
 
         output = self.rollout.generate_sequences(data_proto, **sampling_params)
-        return self._decode_output(output)
 
-    def _decode_output(self, output: DataProto) -> GenerationOutput:
+        # Initialize tool parser if tools were provided
+        parser = None
+        if tools:
+            parser = ToolParser.get_tool_parser(tool_parser, self.tokenizer)
+
+        return self._decode_output(output, message_batches, parser)
+
+    def _decode_output(
+        self,
+        output: DataProto,
+        message_batches: Optional[List[List[Message]]] = None,
+        parser: Optional[ToolParser] = None,
+    ) -> GenerationOutput:
         output = output.to("cpu")
         batch = output.batch
         responses = batch["responses"]
@@ -313,6 +373,8 @@ class InferenceEngine:
         completions: List[str] = []
         token_ids: List[List[int]] = []
         metadata: List[Dict[str, Any]] = []
+        all_tool_calls: List[List[ToolCall]] = []
+        output_messages: List[List[Message]] = []
 
         pad_token_id = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
 
@@ -336,7 +398,111 @@ class InferenceEngine:
                 }
             )
 
-        return GenerationOutput(completions=completions, token_ids=token_ids, metadata=metadata)
+            # Parse tool calls if parser provided
+            if parser is not None:
+                # Run async extraction in sync context
+                loop = asyncio.new_event_loop()
+                try:
+                    content, function_calls = loop.run_until_complete(
+                        parser.extract_tool_calls(ids)
+                    )
+                finally:
+                    loop.close()
+
+                # Convert to ToolCall objects
+                calls = [ToolCall.from_function_call(fc) for fc in function_calls]
+                all_tool_calls.append(calls)
+
+                # Build conversation history for continuation
+                if message_batches is not None:
+                    msgs = list(message_batches[idx])  # Copy original messages
+                    # Add assistant message with tool calls
+                    assistant_msg: Message = {"role": "assistant", "content": content}
+                    if calls:
+                        assistant_msg["tool_calls"] = [
+                            {
+                                "id": f"call_{i}",
+                                "type": "function",
+                                "function": {"name": tc.name, "arguments": tc.raw_arguments}
+                            }
+                            for i, tc in enumerate(calls)
+                        ]
+                    msgs.append(assistant_msg)
+                    output_messages.append(msgs)
+            else:
+                all_tool_calls.append([])
+                if message_batches is not None:
+                    msgs = list(message_batches[idx])
+                    msgs.append({"role": "assistant", "content": text})
+                    output_messages.append(msgs)
+
+        return GenerationOutput(
+            completions=completions,
+            token_ids=token_ids,
+            metadata=metadata,
+            tool_calls=all_tool_calls if parser else None,
+            messages=output_messages if message_batches else None,
+        )
+
+    def generate_with_tool_result(
+        self,
+        messages: List[Message],
+        tool_call: ToolCall,
+        tool_result: str,
+        tools: Optional[List[Tool]] = None,
+        tool_call_id: str = "call_0",
+        tool_parser: str = "hermes",
+        **kwargs,
+    ) -> GenerationOutput:
+        """Continue generation after executing a tool call.
+
+        This helper adds the tool result to the conversation and generates the next response.
+
+        Args:
+            messages: Conversation history (use output.messages[i] from previous generate call)
+            tool_call: The ToolCall that was executed
+            tool_result: Result from executing the tool (as string)
+            tools: Same tool definitions used in original call (for continued tool calling)
+            tool_call_id: ID of the tool call (default "call_0")
+            tool_parser: Parser format ("hermes" or "gpt-oss")
+            **kwargs: Sampling parameters
+
+        Returns:
+            GenerationOutput with the model's response after seeing the tool result
+
+        Example:
+            # First call
+            output = engine.generate("What's the weather?", tools=[weather_tool])
+
+            if output.tool_calls and output.tool_calls[0]:
+                # Execute the tool
+                tool_call = output.tool_calls[0][0]
+                result = my_weather_function(**tool_call.arguments)
+
+                # Continue conversation
+                output = engine.generate_with_tool_result(
+                    messages=output.messages[0],
+                    tool_call=tool_call,
+                    tool_result=str(result),
+                    tools=[weather_tool],  # Keep tools for potential follow-up calls
+                )
+        """
+        # Add tool result message to conversation
+        updated_messages = list(messages)
+        updated_messages.append({
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "name": tool_call.name,
+            "content": tool_result,
+        })
+
+        # Generate next response
+        return self.generate(
+            [updated_messages],
+            tools=tools,
+            tool_parser=tool_parser,
+            **kwargs,
+        )
 
     def shutdown(self):
         """Best-effort cleanup of the inference engine."""
