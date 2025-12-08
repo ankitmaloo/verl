@@ -1,0 +1,93 @@
+# VERL vLLM Async Rollout Configuration
+# Single GPU inference/rollout setup using vLLM backend
+
+# ============================================================================
+# Model Settings
+# ============================================================================
+model_path: "Qwen/Qwen3-0.6B"
+trust_remote_code: false
+
+# ============================================================================
+# Rollout Backend Configuration
+# ============================================================================
+rollout:
+  # Core settings - USE "vllm" instead of "sglang"
+  name: vllm                          # Use vLLM backend
+  mode: async                         # Async mode
+
+  # Sequence length settings
+  prompt_length: 2048                 # Max prompt length
+  response_length: 512                # Max response/generation length
+  max_model_len: null                 # Auto-calculated as prompt_length + response_length
+  max_num_seqs: 1024                  # Max sequences vLLM can handle
+  max_num_batched_tokens: 8192        # Max tokens in a batch
+
+  # Sampling parameters (training)
+  temperature: 1.0                    # Sampling temperature
+  top_k: -1                           # Top-k sampling (-1 = disabled)
+  top_p: 1.0                          # Top-p (nucleus) sampling
+  do_sample: true                     # Enable sampling (false = greedy)
+  n: 1                                # Number of completions per prompt
+  ignore_eos: false                   # Continue after EOS token
+
+  # Validation sampling (different from training)
+  val_kwargs:
+    temperature: 0                    # Greedy for validation
+    top_k: -1
+    top_p: 1.0
+    do_sample: false
+    n: 1
+
+  # GPU & parallelism (1 GPU setup)
+  tensor_model_parallel_size: 1       # Tensor parallel - MUST be 1 for single GPU
+  data_parallel_size: 1               # Data parallel
+  expert_parallel_size: 1             # Expert parallel (for MoE models)
+  pipeline_model_parallel_size: 1     # Pipeline parallel
+
+  # Memory & performance
+  gpu_memory_utilization: 0.5         # Fraction of GPU memory for KV cache
+  dtype: auto                         # Model precision (bfloat16/float16/float32/auto)
+  free_cache_engine: true             # Free KV cache after generation
+  enforce_eager: false                # false = use CUDA graphs (faster)
+
+  # Performance optimizations
+  enable_chunked_prefill: true        # Better throughput for long prompts
+  enable_prefix_caching: true         # Cache common prefixes
+
+  # Model loading
+  load_format: auto                   # "auto" for real weights
+
+  # vLLM engine-specific settings
+  engine_kwargs:
+    vllm:
+      # Add vLLM-specific args here if needed
+      # swap_space: 4                 # CPU swap space in GB
+      # block_size: 16                # KV cache block size
+
+  # Log probabilities - IMPORTANT for RL training
+  calculate_log_probs: false          # Set to true to return log probs
+
+  # Logging & debugging
+  disable_log_stats: true             # Disable verbose logging
+
+  # Multi-turn & tool calling (optional)
+  multi_turn:
+    enable: false
+    max_assistant_turns: null
+    max_user_turns: null
+    tool_config_path: null
+    format: hermes
+
+# ============================================================================
+# Evaluation Settings
+# ============================================================================
+eval:
+  num_samples: null                   # null = all samples
+  batch_size: 16                      # Batch size for evaluation
+
+# ============================================================================
+# Logging (Wandb)
+# ============================================================================
+wandb:
+  project: "gsm8k-eval"
+  run_name: null

@@ -75,14 +75,14 @@ def run_test(name: str, test_fn: Callable[[], tuple[bool, str, Optional[str]]]) 
 class InferenceTests:
     """Test suite for the InferenceEngine."""
 
-    def __init__(self, config_path: str = "final/config.yaml"):
+    def __init__(self, config_path: str = "config.yaml"):
         self.config_path = config_path
         self.engine = None
 
     def setup(self) -> tuple[bool, str, Optional[str]]:
         """Initialize the inference engine."""
         try:
-            from final.inf import InferenceEngine
+            from inf import InferenceEngine
             
             print(f"  Loading config from: {self.config_path}")
             self.engine = InferenceEngine(self.config_path)
@@ -373,7 +373,7 @@ def main():
     parser = argparse.ArgumentParser(description="Test VERL SGLang Inference Engine")
     parser.add_argument("--quick", action="store_true", help="Run quick smoke test only")
     parser.add_argument("--verbose", "-v", action="store_true", help="Show detailed output")
-    parser.add_argument("--config", default="final/config.yaml", help="Path to config file")
+    parser.add_argument("--config", default="config.yaml", help="Path to config file")
     args = parser.parse_args()
 
     print(f"\n{Colors.BOLD}VERL SGLang Inference Engine Tests{Colors.END}")

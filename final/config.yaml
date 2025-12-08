@@ -100,7 +100,7 @@ rollout:
 # ============================================================================
 eval:
   num_samples: null                 # null = all samples
-  batch_size: 1
+  batch_size: 16                    # Batch size for evaluation (larger = faster)
 
 # ============================================================================
 # Logging (Wandb)
