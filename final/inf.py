@@ -10,7 +10,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Union
 
 import numpy as np
@@ -26,7 +28,12 @@ from verl.utils.device import get_visible_devices_keyword
 from verl.utils.model import compute_position_id_with_mask
 from verl.utils.torch_functional import pad_sequence_to_length
 from verl.workers.config import HFModelConfig, RolloutConfig
-from verl.workers.rollout.sglang_rollout.sglang_rollout import SGLangRollout
+
+# Use a vendored copy of the pre-16039d62 SGLangRollout to keep serverless async support.
+HERE = Path(__file__).resolve().parent
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
+from legacy_sglang_rollout import SGLangRollout  # type: ignore
 
 Message = Dict[str, Any]
 Tool = Dict[str, Any]  # OpenAI-format tool definition
