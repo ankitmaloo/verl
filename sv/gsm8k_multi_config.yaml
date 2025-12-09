@@ -1,0 +1,69 @@
+# Minimal single-GPU multi-turn rollout config (sglang) for GSM8K+tools.
+# Fill in local paths before running.
+
+trainer:
+  nnodes: 1
+  n_gpus_per_node: 1
+
+data:
+  train_files: /dev/null  # unused in prompt-driven flow
+  val_files: /dev/null    # unused in prompt-driven flow
+  cache_dir: ~/.cache/verl/rlhf
+  prompt_key: prompt
+  max_prompt_length: 512
+  max_response_length: 512
+  truncation: error
+  filter_overlong_prompts: true
+
+actor_rollout_ref:
+  model:
+    path: Qwen/Qwen3-4B  # replace with your local/remote HF id
+    trust_remote_code: false
+    use_remove_padding: true
+    use_fused_kernels: false
+  rollout:
+    name: sglang
+    mode: async
+    temperature: 1.0
+    top_k: -1
+    top_p: 1.0
+    prompt_length: ${data.max_prompt_length}
+    response_length: ${data.max_response_length}
+    tensor_model_parallel_size: 1
+    data_parallel_size: 1
+    pipeline_model_parallel_size: 1
+    enable_prefix_caching: true
+    free_cache_engine: true
+    agent:
+      num_workers: 1
+    multi_turn:
+      enable: true
+      max_assistant_turns: 4
+      max_user_turns: 2
+      tool_config_path: sv/tool_config/python_code_tool.yaml
+    engine_kwargs:
+      sglang:
+        max_num_batched_tokens: 8192
+        max_model_len: 4096
+  actor:
+    strategy: fsdp
+    ppo_mini_batch_size: 1
+    ppo_micro_batch_size_per_gpu: 1
+    use_kl_loss: false
+    policy_loss:
+      loss_agg_mode: mean
+      loss_scale_factor: 1.0
+  ref: {}
+
+algorithm:
+  adv_estimator: grpo
+  gamma: 1.0
+  lam: 1.0
+  norm_adv_by_std_in_grpo: true
+  use_kl_in_reward: false
+
+reward_model:
+  enable: false  # we plug a custom scorer instead
+
+custom_reward:
+  scorer_path: /path/to/your_custom_reward.py  # placeholder; not used yet
