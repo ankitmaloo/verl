@@ -15,7 +15,7 @@ data:
   truncation: error
   filter_overlong_prompts: true
 
-actor_rollout_ref:
+  actor_rollout_ref:
   model:
     path: Qwen/Qwen3-4B  # replace with your local/remote HF id
     trust_remote_code: false
@@ -38,7 +38,7 @@ actor_rollout_ref:
       num_workers: 1
     multi_turn:
       enable: true
-      max_assistant_turns: 4
+      max_assistant_turns: 10
       max_user_turns: 2
       tool_config_path: sv/tool_config/python_code_tool.yaml
     engine_kwargs:

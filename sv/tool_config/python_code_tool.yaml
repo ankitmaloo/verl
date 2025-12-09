@@ -1,13 +1,8 @@
 tools:
-  - class_name: "verl.tools.sandbox_fusion_tools.SandboxFusionTool"
+  - class_name: "sv.local_python_tool.LocalPythonTool"
     config:
-      sandbox_fusion_url: "https://your-sandbox-endpoint/run_code"  # replace with your code execution endpoint
-      num_workers: 1
-      enable_global_rate_limit: false
-      rate_limit: 10
-      default_timeout: 30
-      default_language: "python"
-      memory_limit_mb: 1024
+      timeout: 10
+      max_output_chars: 4000
       type: native
     tool_schema:
       type: "function"
