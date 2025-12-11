@@ -19,15 +19,25 @@ import torch
 from omegaconf import OmegaConf
 
 from sv import inf, train
-from verl.trainer.ppo.core_algos import AdvantageEstimator, compute_advantage
-from verl.trainer.ppo.ray_trainer import compute_response_mask
+from verl.trainer.ppo.core_algos import AdvantageEstimator
+from verl.trainer.ppo.ray_trainer import compute_advantage, compute_response_mask
 
 DEFAULT_TASK = "sv.task_gsm8k"
 
 
 def load_config(config_path: str | pathlib.Path):
     cfg = OmegaConf.load(config_path)
-    return OmegaConf.to_container(cfg, resolve=True)
+    cfg_container = OmegaConf.to_container(cfg, resolve=True)
+    # Debug: print top-level keys to help diagnose config shape issues
+    print(f"[algo] loaded config from {config_path} with keys: {list(cfg_container.keys())}")
+    if "actor_rollout_ref" in cfg_container:
+        ar = cfg_container["actor_rollout_ref"]
+        print(f"[algo] actor_rollout_ref keys: {list(ar.keys())}")
+        if isinstance(ar, dict) and "model" in ar:
+            print(f"[algo] actor_rollout_ref.model: {ar['model']}")
+        if isinstance(ar, dict) and "rollout" in ar:
+            print(f"[algo] actor_rollout_ref.rollout keys: {list(ar['rollout'].keys())}")
+    return cfg_container
 
 
 def default_reward_fn(batch, state=None) -> tuple[torch.Tensor, dict]:
@@ -50,9 +60,50 @@ def _load_task(task_path: str):
 
 
 def _get_max_turns(cfg: Dict[str, Any]) -> int:
-    multi_turn = cfg.get("actor_rollout_ref", {}).get("rollout", {}).get("multi_turn", {})
-    configured = int(multi_turn.get("max_assistant_turns", 1))
+    rollout_cfg = _get_rollout_cfg(cfg)
+    multi_turn = rollout_cfg.get("multi_turn", {}) if isinstance(rollout_cfg, dict) else {}
+    configured = int(multi_turn.get("max_assistant_turns", 1) or 1)
     return min(10, configured)
+
+
+def _get_model_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Resolve model config across known layouts.
+    Priority:
+      1) actor_rollout_ref.model (standard for this flow)
+      2) actor.model
+      3) top-level 'model' block
+      4) top-level 'model_path' (convert to dict)
+    """
+    if isinstance(cfg, dict):
+        ar = cfg.get("actor_rollout_ref", {})
+        if isinstance(ar, dict) and "model" in ar:
+            return ar["model"]
+        actor = cfg.get("actor", {})
+        if isinstance(actor, dict) and "model" in actor:
+            return actor["model"]
+        if "model" in cfg:
+            return cfg["model"]
+        if "model_path" in cfg:
+            return {"path": cfg["model_path"], "trust_remote_code": cfg.get("trust_remote_code", False)}
+    print(f"[algo] model lookup failed; cfg keys: {list(cfg.keys())}")
+    raise KeyError("Model config not found; expected actor_rollout_ref.model or model/model_path in config.")
+
+
+def _get_rollout_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Resolve rollout config across known layouts.
+      1) actor_rollout_ref.rollout
+      2) top-level rollout
+    """
+    if isinstance(cfg, dict):
+        ar = cfg.get("actor_rollout_ref", {})
+        if isinstance(ar, dict) and "rollout" in ar:
+            return ar["rollout"]
+        if "rollout" in cfg:
+            return cfg["rollout"]
+    print(f"[algo] rollout lookup failed; cfg keys: {list(cfg.keys())}")
+    raise KeyError("Rollout config not found; expected actor_rollout_ref.rollout or rollout in config.")
 
 
 def run(
@@ -71,7 +122,8 @@ def run(
     state = task.init_state(cfg) if hasattr(task, "init_state") else None
 
     # Build tokenizer/processor and agent loop
-    tokenizer, processor = inf.build_tokenizer_processor(cfg["actor_rollout_ref"]["model"])
+    model_cfg = _get_model_cfg(cfg)
+    tokenizer, processor = inf.build_tokenizer_processor(model_cfg)
     agent_loop_mgr = inf.build_agent_loop_manager(cfg)
 
     # Task-provided prompts
@@ -119,7 +171,7 @@ def run(
 
     # Reward
     rewards, reward_extra = reward_fn(batch, state=state)
-    batch.batch["token_level_scores"] = rewards
+    batch.batch["token_level_rewards"] = rewards
     if reward_extra:
         batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra.items()})
 

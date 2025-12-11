@@ -1,0 +1,5 @@
+interaction:
+  - name: "gsm8k_codecheck"
+    class_name: "verl_research.tools.gsm8k_v.Gsm8kCodeCheckInteraction"
+    config:
+      max_turns: 2  # answer + code

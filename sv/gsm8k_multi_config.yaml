@@ -15,13 +15,14 @@ data:
   truncation: error
   filter_overlong_prompts: true
 
-  actor_rollout_ref:
+actor_rollout_ref:
   model:
     path: Qwen/Qwen3-4B  # replace with your local/remote HF id
     trust_remote_code: false
     use_remove_padding: true
     use_fused_kernels: false
   rollout:
+    _target_: verl.workers.config.RolloutConfig
     name: sglang
     mode: async
     temperature: 1.0
@@ -42,18 +43,16 @@ data:
       max_user_turns: 2
       tool_config_path: sv/tool_config/python_code_tool.yaml
     engine_kwargs:
-      sglang:
-        max_num_batched_tokens: 8192
-        max_model_len: 4096
-  actor:
-    strategy: fsdp
-    ppo_mini_batch_size: 1
-    ppo_micro_batch_size_per_gpu: 1
-    use_kl_loss: false
-    policy_loss:
-      loss_agg_mode: mean
-      loss_scale_factor: 1.0
-  ref: {}
+      sglang: {}
+actor:
+  strategy: fsdp
+  ppo_mini_batch_size: 1
+  ppo_micro_batch_size_per_gpu: 1
+  use_kl_loss: false
+  policy_loss:
+    loss_agg_mode: mean
+    loss_scale_factor: 1.0
+ref: {}
 
 algorithm:
   adv_estimator: grpo
