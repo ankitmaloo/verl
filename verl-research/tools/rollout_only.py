@@ -23,24 +23,40 @@ import argparse
 import json
 from pathlib import Path
 
+import sys
 import importlib
+import numpy as np
 import ray
-import yaml
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
 
-from verl.utils.config import omega_conf_to_dataclass
+# Ensure repo root is on sys.path for imports like verl_research.*
+repo_root = Path(__file__).resolve().parents[2]
+if str(repo_root) not in sys.path:
+    sys.path.insert(0, str(repo_root))
+
 from verl.utils.debug import marked_timer
 from verl.experimental.agent_loop import AgentLoopManager
-from verl.protocol import DataProto
-from verl.trainer.config import TrainerConfig
-from verl.trainer.ppo.ray_trainer import pad_dataproto_to_divisor
+from verl.protocol import DataProto, pad_dataproto_to_divisor, unpad_dataproto
 from verl_research.tools.training_step import training_step
 
 
 def load_hydra_config(cfg_path: Path):
-    """Load a hydra-style YAML and resolve defaults."""
-    cfg = OmegaConf.load(cfg_path)
-    # Hydra defaults may point into verl/trainer/config; keep as-is.
+    """Load a Hydra-style YAML and resolve defaults (ppo_trainer, etc.)."""
+    cfg_path = cfg_path.resolve()
+    try:
+        from hydra import compose, initialize_config_dir
+    except ImportError as e:
+        raise ImportError("hydra-core is required for rollout_only config resolution. pip install hydra-core") from e
+
+    # Add trainer config dir so defaults like `ppo_trainer` can be found when running from repo root
+    repo_root = Path(__file__).resolve().parents[2]
+    trainer_cfg_dir = (repo_root / "verl" / "trainer" / "config").resolve()
+    overrides = []
+    if trainer_cfg_dir.exists():
+        overrides.append(f"+hydra.searchpath=[file://{trainer_cfg_dir}]")
+
+    with initialize_config_dir(version_base=None, config_dir=str(cfg_path.parent)):
+        cfg = compose(config_name=cfg_path.stem, overrides=overrides)
     return cfg
 
 
@@ -64,7 +80,7 @@ def init_ray():
         ray.init(ignore_reinit_error=True)
 
 
-def build_agent_loop_manager(cfg: TrainerConfig) -> AgentLoopManager:
+def build_agent_loop_manager(cfg: DictConfig) -> AgentLoopManager:
     from tests.experimental.agent_loop.agent_utils import init_agent_loop_manager
 
     # Reuse helper that builds Ray worker group + AgentLoopManager (hybrid, colocated)
@@ -89,7 +105,7 @@ def collate_batch(batch, tokenizer):
     # pad/truncate via tokenizer chat template
     # RLHFSequenceDataset already tokenized; use its outputs
     # here we just pass through
-    non_tensor_batch = {"raw_prompt": prompts}
+    non_tensor_batch = {"raw_prompt": np.array(prompts, dtype=object)}
     data = DataProto(batch=None, non_tensor_batch=non_tensor_batch, meta_info={"validate": False})
     return data
 
@@ -127,7 +143,7 @@ def main():
 
     raw_cfg = load_hydra_config(args.config)
     cfg = override_for_rollout_only(raw_cfg, batch_size=args.batch_size)
-    cfg_dc: TrainerConfig = omega_conf_to_dataclass(cfg, dataclass_type=TrainerConfig)
+    cfg_dc: DictConfig = cfg
 
     # Build AgentLoopManager (spins rollout server)
     with marked_timer("init_agent_loop_manager"):
@@ -155,11 +171,12 @@ def main():
     for batch in dataloader(dataset, args.batch_size):
         data = collate_batch(batch, tokenizer)
         # pad to divisor (mirrors trainer behavior)
-        data = pad_dataproto_to_divisor(data, divisor=cfg_dc.trainer.n_gpus_per_node)
+        data, pad_size = pad_dataproto_to_divisor(data, size_divisor=cfg_dc.trainer.n_gpus_per_node)
 
         # === Rollout ===
         with marked_timer("generate_sequences"):
             rollout_out: DataProto = agent_loop_manager.generate_sequences(data)
+        rollout_out = unpad_dataproto(rollout_out, pad_size)
 
         # Training step placeholder (no optimizer updates)
         train_metrics = training_step(rollout_out, cfg_dc)
