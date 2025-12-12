@@ -1,0 +1,87 @@
+# sv2 standalone config for multi-turn rollouts with sglang
+# Independent of main verl trainer configs
+# Configured for: Qwen3-0.6B (bf16) on H100
+
+hydra:
+  searchpath:
+    - file://verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+# Training mode flag
+# When false, runs in eval mode (no weight updates, just rollouts + reward computation)
+# When true, would enable PPO training (weight updates)
+train: false
+
+# Model configuration - Qwen3-0.6B on H100
+actor_rollout_ref:
+  hybrid_engine: true
+  model:
+    path: Qwen/Qwen3-0.6B
+    use_shm: false
+    dtype: bf16  # bf16 for H100
+
+  actor:
+    ppo_mini_batch_size: 32  # H100 can handle larger batches
+    ppo_micro_batch_size_per_gpu: 32
+    # Training params (used when train=true)
+    # ppo_epochs: 1
+    # lr: 1e-6
+    # clip_ratio: 0.2
+
+  rollout:
+    name: sglang
+    mode: async
+    gpu_memory_utilization: 0.85  # H100 80GB - can use more VRAM
+    tensor_parallel_size: 1  # Qwen3-0.6B fits on single H100
+    log_prob_micro_batch_size_per_gpu: 32
+
+    # Multi-turn configuration
+    multi_turn:
+      enable: true
+      max_assistant_turns: 5
+      max_user_turns: 3
+      # interaction_config_path set via CLI or override
+
+    # Agent loop workers
+    agent:
+      num_workers: 1
+
+# Data configuration
+data:
+  max_prompt_length: 2048  # Qwen3 supports longer context
+  max_response_length: 2048
+  train_batch_size: 64  # H100 can handle larger batches
+  return_raw_chat: true  # Required for AgentLoop
+  trust_remote_code: false
+  # train_files and val_files set via CLI
+  dataloader_num_workers: 4
+
+# sv2-specific configuration
+sv2:
+  split: val
+  batch_size: 64  # Larger batch for H100
+  max_batches: 1
+  max_samples: -1
+  dump_jsonl: null  # Set to path to dump rollout results
+
+# Reward configuration
+# Rewards are computed even in eval mode (train=false) for analysis
+reward:
+  compute_reward: true
+  # reward_fn: null  # Set to custom reward function path if needed
+
+# Trainer (minimal when train=false)
+trainer:
+  nnodes: 1
+  n_gpus_per_node: 1
+  project_name: sv2
+  experiment_name: multiturn_rollout
+  logger: ["console"]
+
+# Ray configuration
+ray_kwargs:
+  ray_init:
+    num_cpus: 8  # More CPUs for H100 system

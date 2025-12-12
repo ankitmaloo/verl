@@ -1,0 +1,12 @@
+# sv2 interaction configuration
+# Defines available interactions for multi-turn rollouts
+
+interaction:
+  # Code verification interaction
+  # Asks model to write Python code to verify its answer
+  - name: "code_verify"
+    class_name: "sv2.interactions.code_verify_interaction.CodeVerifyInteraction"
+    config:
+      max_turns: 2  # answer + code
+      feedback_message: "are you sure, can you write python code to verify the calculation"
+      terminate_message: "Thanks for the verification."

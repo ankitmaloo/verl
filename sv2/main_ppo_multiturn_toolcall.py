@@ -11,20 +11,23 @@ This is intentionally *not* a full PPO trainer. It is a small harness to:
   4) Send the batch to AgentLoopManager.generate_sequences (multi-turn/tool calling)
   5) Decode and optionally dump results
 
-Run (example):
-  python3 -m sv2.main_ppo_multiturn_toolcall --config-path examples/sglang_multiturn/config --config-name gsm8k_multiturn_grpo \\
-    data.train_files=$HOME/data/gsm8k_tool_agent_loop/train.parquet data.val_files=$HOME/data/gsm8k_tool_agent_loop/test.parquet \\
-    data.return_raw_chat=true actor_rollout_ref.rollout.mode=async actor_rollout_ref.rollout.name=vllm \\
-    actor_rollout_ref.rollout.multi_turn.enable=true actor_rollout_ref.rollout.multi_turn.tool_config_path=examples/sglang_multiturn/config/tool_config/gsm8k_tool_config.yaml \\
-    sv2.max_batches=1 sv2.batch_size=4 sv2.split=val
+Supports two modes:
+  A) Tool calling: Model calls tools (calculator, search, etc.) which get executed
+  B) Interaction: After model response, inject user feedback and continue generation
+
+Run (example with interaction - user asks for code verification):
+  python -m sv2.main_ppo_multiturn_toolcall \\
+    --config-path sv2/config --config-name sv2_multiturn \\
+    data.train_files=$DATA_DIR/train.parquet data.val_files=$DATA_DIR/test.parquet \\
+    actor_rollout_ref.rollout.multi_turn.interaction_config_path=sv2/config/interaction_config.yaml \\
+    sv2.interaction_name=code_verify sv2.batch_size=4 sv2.max_batches=1
 
 Notes:
   - Tool calling is chosen via per-sample `agent_name` (e.g. `tool_agent`), which
     should be present in the parquet (see `examples/data_preprocess/gsm8k_tool_agent_loop.py`).
-  - For "user adds a string and it keeps going", set
-    `actor_rollout_ref.rollout.multi_turn.interaction_config_path=...` AND ensure
-    each sample has `extra_info.interaction_kwargs.name` pointing to a registered
-    interaction in that config.
+  - For "user adds a string and it keeps going" (Interaction mode), set:
+    - `actor_rollout_ref.rollout.multi_turn.interaction_config_path=...`
+    - `sv2.interaction_name=<name>` (or have `extra_info.interaction_kwargs.name` in dataset)
 """
 
 from __future__ import annotations
@@ -57,6 +60,9 @@ class Sv2RolloutConfig:
     max_batches: int = 1
     max_samples: int = -1  # -1 means no limit; applied at dataset construction
     dump_jsonl: str | None = None
+    # Interaction mode: name of the interaction to use (from interaction_config.yaml)
+    # If set, injects interaction_kwargs into samples that don't have it
+    interaction_name: str | None = None
 
 
 def _get_sv2_cfg(config: DictConfig) -> Sv2RolloutConfig:
@@ -67,6 +73,7 @@ def _get_sv2_cfg(config: DictConfig) -> Sv2RolloutConfig:
         max_batches=int(sv2_cfg.get("max_batches", 1)),
         max_samples=int(sv2_cfg.get("max_samples", -1)),
         dump_jsonl=sv2_cfg.get("dump_jsonl", None),
+        interaction_name=sv2_cfg.get("interaction_name", None),
     )
 
 
@@ -136,6 +143,50 @@ def _dump_jsonl(path: str, rows: list[dict[str, Any]]) -> None:
         for row in rows:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
+
+def _ensure_interaction_kwargs(
+    batch: DataProto,
+    interaction_name: str | None,
+    interaction_config_path: str | None,
+) -> None:
+    """
+    Ensure each sample has interaction_kwargs in extra_info if interaction is enabled.
+
+    This allows the driver to enable interaction mode even if the dataset
+    doesn't have interaction_kwargs pre-baked.
+    """
+    if not interaction_config_path or not interaction_name:
+        return
+
+    batch_size = len(batch)
+    extra_info = batch.non_tensor_batch.get("extra_info")
+
+    if extra_info is None:
+        # Create extra_info array with interaction_kwargs
+        extra_info = np.array(
+            [{"interaction_kwargs": {"name": interaction_name}} for _ in range(batch_size)],
+            dtype=object,
+        )
+        batch.non_tensor_batch["extra_info"] = extra_info
+        print(f"[sv2] Injected interaction_kwargs.name={interaction_name!r} into {batch_size} samples (new extra_info)")
+        return
+
+    # extra_info exists, ensure each has interaction_kwargs
+    modified_count = 0
+    for i in range(batch_size):
+        if extra_info[i] is None:
+            extra_info[i] = {}
+
+        if "interaction_kwargs" not in extra_info[i]:
+            extra_info[i]["interaction_kwargs"] = {"name": interaction_name}
+            modified_count += 1
+        elif "name" not in extra_info[i]["interaction_kwargs"]:
+            extra_info[i]["interaction_kwargs"]["name"] = interaction_name
+            modified_count += 1
+
+    if modified_count > 0:
+        print(f"[sv2] Injected interaction_kwargs.name={interaction_name!r} into {modified_count}/{batch_size} samples")
+
 def run(config: DictConfig) -> None:
     sv2_cfg = _get_sv2_cfg(config)
     print(f"[sv2] host={socket.gethostname()} pid={os.getpid()}")
@@ -151,6 +202,17 @@ def run(config: DictConfig) -> None:
             f"[sv2] Warning: actor_rollout_ref.rollout.mode={config.actor_rollout_ref.rollout.mode!r}; "
             "multi-turn/tool calling typically runs via the async AgentLoop stack."
         )
+
+    # Log interaction mode status
+    multi_turn_cfg = config.actor_rollout_ref.rollout.multi_turn
+    interaction_config_path = getattr(multi_turn_cfg, "interaction_config_path", None)
+    if interaction_config_path:
+        print(f"[sv2] Interaction mode enabled: config={interaction_config_path}")
+        if sv2_cfg.interaction_name:
+            print(f"[sv2] Using interaction: {sv2_cfg.interaction_name!r}")
+        else:
+            print("[sv2] Warning: interaction_config_path set but sv2.interaction_name not set. "
+                  "Dataset must have extra_info.interaction_kwargs.name for each sample.")
 
     _init_ray_if_needed(config)
     tokenizer, processor = _build_tokenizer_processor(config)
@@ -188,12 +250,25 @@ def run(config: DictConfig) -> None:
             batch.non_tensor_batch["uid"] = np.array([f"sv2_{batch_idx}_{i}" for i in range(len(batch))], dtype=object)
 
         if "agent_name" not in batch.non_tensor_batch:
-            inferred = "tool_agent" if config.actor_rollout_ref.rollout.multi_turn.tool_config_path else "single_turn_agent"
+            # For interaction mode, we still need tool_agent (it handles both tools and interactions)
+            multi_turn_cfg = config.actor_rollout_ref.rollout.multi_turn
+            has_tools = getattr(multi_turn_cfg, "tool_config_path", None)
+            has_interaction = getattr(multi_turn_cfg, "interaction_config_path", None)
+            if has_tools or has_interaction:
+                inferred = "tool_agent"
+            else:
+                inferred = "single_turn_agent"
             print(
                 f"[sv2] Warning: dataset has no `agent_name`; defaulting to {inferred!r}. "
-                "For tool calling, set parquet column agent_name='tool_agent'."
+                "For tool calling or interactions, set parquet column agent_name='tool_agent'."
             )
             batch.non_tensor_batch["agent_name"] = np.array([inferred] * len(batch), dtype=object)
+
+        # Inject interaction_kwargs if interaction mode is enabled
+        interaction_config_path = getattr(
+            config.actor_rollout_ref.rollout.multi_turn, "interaction_config_path", None
+        )
+        _ensure_interaction_kwargs(batch, sv2_cfg.interaction_name, interaction_config_path)
 
         gen_batch = _get_gen_batch_for_agent_loop(batch)
         size_divisor = int(config.actor_rollout_ref.rollout.agent.num_workers)
