@@ -1,0 +1,14 @@
+tools:
+  - name: python_exec
+    class_name: sv2.tools.python_tool.PythonExecTool
+    tool_schema:
+      name: python_exec
+      description: Execute Python code and return the output. Use this to verify calculations or run algorithms.
+      parameters:
+        type: object
+        properties:
+          code:
+            type: string
+            description: Valid Python code to execute.
+        required:
+          - code

@@ -122,16 +122,28 @@ class CodeVerifyInteraction(BaseInteraction):
 
     async def calculate_score(self, instance_id: str, **kwargs) -> float:
         """
-        Calculate reward score.
-
-        Override this for custom reward logic (e.g., execute code, check answer).
-        Default returns 0.0 (reward handled elsewhere like reward_model).
+        Calculate reward score based on code verification.
         """
-        # In a real implementation, you might:
-        # 1. Parse the code from code_response
-        # 2. Execute it safely in a sandbox
-        # 3. Compare result to ground_truth
-        # For now, return 0.0 and let external reward_model handle scoring
+        state = self._instances[instance_id]
+        code_response = state.get("code_response", "")
+        ground_truth = state.get("ground_truth", "")
+
+        if not code_response or not ground_truth:
+            return 0.0
+
+        # Simple check: does the code mention the answer?
+        # In a real scenario, we would execute the code.
+        # Here we just check if the ground truth number appears in the code or comments
+        # which indicates the model is trying to verify towards the correct answer.
+        # We can also check for "print" statements.
+        
+        # Clean ground truth (remove commas, etc)
+        gt_clean = ground_truth.replace(",", "").strip()
+        
+        if gt_clean in code_response:
+             # Reward for having the correct number in the code
+             return 0.5
+        
         return 0.0
 
     async def finalize_interaction(self, instance_id: str, **kwargs) -> None:

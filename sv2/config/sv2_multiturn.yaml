@@ -29,30 +29,53 @@ actor_rollout_ref:
     ppo_mini_batch_size: 32  # H100 can handle larger batches
     ppo_micro_batch_size_per_gpu: 32
     # Training params (used when train=true)
-    # ppo_epochs: 1
-    # lr: 1e-6
-    # clip_ratio: 0.2
+    optim:
+      lr: 1e-6
+      lr_warmup_steps_ratio: 0.0  # Fraction of total steps
+      min_lr_ratio: 0.1  # END LR = start LR * min_lr_ratio
+      weight_decay: 0.01
 
   rollout:
     name: sglang
     mode: async
-    gpu_memory_utilization: 0.85  # H100 80GB - can use more VRAM
-    tensor_model_parallel_size: 1  # Qwen3-0.6B fits on single H100
-    data_parallel_size: 1  # Single GPU
-    pipeline_model_parallel_size: 1  # No pipeline parallelism
+    gpu_memory_utilization: 0.85
+    tensor_model_parallel_size: 1
+    data_parallel_size: 1
+    pipeline_model_parallel_size: 1
     log_prob_micro_batch_size_per_gpu: 32
-    free_cache_engine: false  # Keep cache engine alive
+    free_cache_engine: false
 
-    # Multi-turn configuration
     multi_turn:
       enable: true
       max_assistant_turns: 5
       max_user_turns: 3
-      # interaction_config_path set via CLI or override
 
-    # Agent loop workers
     agent:
       num_workers: 1
+
+# Critic configuration
+critic:
+  optim:
+    lr: 1e-5
+    lr_warmup_steps_ratio: 0.0
+    min_lr_ratio: 0.1
+    weight_decay: 0.01
+  model:
+    path: Qwen/Qwen3-0.6B # Use same as actor or reward model
+    use_shm: false
+    dtype: bf16
+  ppo_mini_batch_size: 32
+  ppo_micro_batch_size_per_gpu: 32
+
+# Algorithm configuration
+algorithm:
+  gamma: 0.99
+  lam: 0.95
+  adv_estimator: gae
+  kl_penalty: kl
+  kl_ctrl:
+    type: fixed
+    kl_coef: 0.001
 
 # Data configuration
 data:

@@ -216,7 +216,20 @@ class Sv2RewardManager:
 
             # Place reward at the last valid response token
             if valid_response_length > 0:
-                reward_tensor[i, valid_response_length - 1] = reward
+                final_reward = reward
+                
+                # Add interaction rewards (turn_scores) if present
+                turn_scores = data_item.non_tensor_batch.get("turn_scores")
+                if turn_scores is not None and len(turn_scores) > 0:
+                    # turn_scores might be a list of mixed types (float or None) or nested
+                    # Just sum up valid float values
+                    interaction_reward = sum(s for s in turn_scores if isinstance(s, (int, float)))
+                    if interaction_reward != 0:
+                        final_reward += interaction_reward
+                        if already_printed.get(data_source, 0) < self.num_examine:
+                            print(f"[sv2/reward] Adding interaction reward: {interaction_reward} (Total: {final_reward})")
+                
+                reward_tensor[i, valid_response_length - 1] = final_reward
 
             # Debug printing
             if data_source not in already_printed:
