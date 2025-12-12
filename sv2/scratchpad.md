@@ -26,10 +26,14 @@
 sv2/
 ├── __init__.py
 ├── install.sh                      # uv-based setup (verl 0.6.1)
-├── main_ppo_multiturn_toolcall.py  # Main driver (hydra entrypoint)
+├── main_ppo_multiturn_toolcall.py  # Main driver (hydra entrypoint, orchestrates everything)
+├── data.py                         # Data loading utilities (tokenizer, datasets, dataloaders)
+├── reward.py                       # GSM8K reward function + Sv2RewardManager
+├── eval.py                         # Evaluation: rollouts + reward computation
+├── train.py                        # Training loop PLACEHOLDER (PPO not implemented)
 ├── scratchpad.md                   # This file
 ├── config/
-│   ├── sv2_multiturn.yaml          # Standalone hydra config
+│   ├── sv2_multiturn.yaml          # Standalone hydra config (Qwen3-0.6B, H100)
 │   └── interaction_config.yaml     # Interaction registry (code_verify)
 ├── interactions/
 │   ├── __init__.py
@@ -167,3 +171,125 @@ Sources:
 - `verl/experimental/agent_loop/tool_agent_loop.py:385-434` - Interaction state handling
 - `verl/interactions/utils/interaction_registry.py` - YAML config loader
 - `examples/data_preprocess/gsm8k_multiturn_w_interaction.py` - Dataset with interaction_kwargs
+
+---
+
+## v3: Modular Architecture with Train/Eval Split
+
+### New code added (v3)
+
+**Modular file structure:**
+- `sv2/data.py` - Data loading utilities
+  - `build_tokenizer_processor()` - Creates tokenizer/processor from model config
+  - `create_dataset()` - Wraps verl's `create_rl_dataset`
+  - `create_dataloader()` - Creates DataLoader with RLHF collation
+  - `select_data_paths()` - Selects train/val paths from config
+
+- `sv2/reward.py` - Reward computation
+  - `extract_gsm8k_answer()` - Extracts #### answer from response
+  - `compute_gsm8k_score()` - Scores GSM8K responses (0 or 1)
+  - `compute_score()` - Generic dispatcher by data_source
+  - `Sv2RewardManager` - Reward manager class compatible with DataProto
+
+- `sv2/eval.py` - Evaluation pipeline
+  - `run_eval()` - Runs rollouts on val data, computes rewards
+  - `EvalResult` - Dataclass with metrics (mean_reward, accuracy, samples)
+  - Handles padding, agent_name injection, interaction_kwargs
+
+- `sv2/train.py` - Training loop **PLACEHOLDER**
+  - `run_training_loop()` - Training loop with periodic eval
+  - `TrainConfig` - Training configuration dataclass
+  - `_ppo_update_placeholder()` - **NOT IMPLEMENTED** - just logs warning
+  - When `train=True`: runs loop but NO weight updates happen
+  - When `train=False`: just runs eval
+
+- `sv2/main_ppo_multiturn_toolcall.py` - Main orchestrator
+  - Reads `train` flag from config
+  - If `train=True`: calls `run_training_loop()`
+  - If `train=False`: calls `run_eval()`
+
+**Config updates (sv2/config/sv2_multiturn.yaml):**
+```yaml
+# Top-level train flag
+train: false  # Set to true for training mode
+
+# Training configuration
+training:
+  total_steps: 100
+  eval_every_n_steps: 10
+  save_every_n_steps: 50
+  ppo_epochs: 1
+  learning_rate: 1e-6
+  clip_ratio: 0.2
+  gamma: 0.99
+  gae_lambda: 0.95
+```
+
+### How reward system works
+
+**verl's reward architecture (from `verl/trainer/ppo/reward.py`):**
+1. `load_reward_manager()` creates a reward manager instance
+2. Reward managers inherit from `AbstractRewardManager`
+3. Default is `NaiveRewardManager` which:
+   - Decodes prompt/response from DataProto
+   - Calls `compute_score(data_source, solution_str, ground_truth, extra_info)`
+   - Places reward at last valid token position
+4. `default_compute_score()` in `verl/utils/reward_score/__init__.py` dispatches by `data_source`:
+   - `"openai/gsm8k"` → `gsm8k.compute_score()`
+   - `"lighteval/MATH"` → `math_reward.compute_score()`
+   - etc.
+
+**sv2's reward (from `sv2/reward.py`):**
+- Simplified version of NaiveRewardManager
+- Only implements GSM8K scorer (extracts `#### answer`)
+- Can extend `compute_score()` for other data sources
+
+### How to run (v3)
+
+**Eval-only mode (default):**
+```bash
+python -m sv2.main_ppo_multiturn_toolcall \
+  --config-path sv2/config --config-name sv2_multiturn \
+  data.train_files=$DATA_DIR/train.parquet \
+  data.val_files=$DATA_DIR/test.parquet \
+  sv2.dump_jsonl=/tmp/sv2_eval.jsonl
+```
+
+**Training mode (placeholder - no actual weight updates):**
+```bash
+python -m sv2.main_ppo_multiturn_toolcall \
+  --config-path sv2/config --config-name sv2_multiturn \
+  train=true \
+  training.total_steps=50 \
+  training.eval_every_n_steps=10 \
+  data.train_files=$DATA_DIR/train.parquet \
+  data.val_files=$DATA_DIR/test.parquet
+```
+
+### What's NOT implemented (TODOs for training)
+
+1. **PPO update** - `sv2/train.py:_ppo_update_placeholder()` needs:
+   - Advantage computation (GAE)
+   - Old log prob computation
+   - Policy loss with clipping
+   - Value loss
+   - Actor/critic weight updates
+
+2. **Checkpointing** - Save/load model weights
+
+3. **Reference policy** - For KL penalty
+
+4. **Critic** - Value function for advantage estimation
+
+To implement actual training, look at:
+- `verl/trainer/ppo/ray_trainer.py` - Full PPO implementation
+- `verl/workers/fsdp_workers.py` - Actor/Critic workers
+- `verl/trainer/ppo/core_algos.py` - PPO loss functions
+
+### Known issues (v3)
+
+- Training mode runs but **does NOT update weights** - it's a placeholder
+- Reward computation happens in driver process (not distributed)
+- No KL penalty support
+- No value function / critic
+- Config inherits from `ppo_trainer` which may have extra fields we don't use

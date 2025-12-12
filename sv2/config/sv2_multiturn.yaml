@@ -66,12 +66,20 @@ sv2:
   max_batches: 1
   max_samples: -1
   dump_jsonl: null  # Set to path to dump rollout results
+  interaction_name: null  # Set to interaction name (e.g., "code_verify")
 
-# Reward configuration
-# Rewards are computed even in eval mode (train=false) for analysis
-reward:
-  compute_reward: true
-  # reward_fn: null  # Set to custom reward function path if needed
+# Training configuration (used when train=true)
+# Training is a PLACEHOLDER - actual PPO update not implemented yet
+training:
+  total_steps: 100  # Total training steps
+  eval_every_n_steps: 10  # Run eval every N steps
+  save_every_n_steps: 50  # Save checkpoint every N steps (placeholder)
+  # PPO hyperparams (placeholders for when training is implemented)
+  ppo_epochs: 1
+  learning_rate: 1e-6
+  clip_ratio: 0.2
+  gamma: 0.99
+  gae_lambda: 0.95
 
 # Trainer (minimal when train=false)
 trainer:
