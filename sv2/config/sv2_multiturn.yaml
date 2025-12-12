@@ -4,7 +4,9 @@
 
 hydra:
   searchpath:
-    - file://verl/trainer/config
+    # Path relative to this config file (sv2/config/)
+    # ../../verl/trainer/config resolves to verl/trainer/config
+    - file://../../verl/trainer/config
 
 defaults:
   - ppo_trainer
@@ -35,8 +37,11 @@ actor_rollout_ref:
     name: sglang
     mode: async
     gpu_memory_utilization: 0.85  # H100 80GB - can use more VRAM
-    tensor_parallel_size: 1  # Qwen3-0.6B fits on single H100
+    tensor_model_parallel_size: 1  # Qwen3-0.6B fits on single H100
+    data_parallel_size: 1  # Single GPU
+    pipeline_model_parallel_size: 1  # No pipeline parallelism
     log_prob_micro_batch_size_per_gpu: 32
+    free_cache_engine: false  # Keep cache engine alive
 
     # Multi-turn configuration
     multi_turn:

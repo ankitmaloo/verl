@@ -1,11 +1,15 @@
 # sv2 interaction configuration
 # Defines available interactions for multi-turn rollouts
+#
+# NOTE: class_name uses module path relative to Python's sys.path
+# When running from sv2/ folder, use: interactions.code_verify_interaction.CodeVerifyInteraction
+# When running from verl/ folder, use: sv2.interactions.code_verify_interaction.CodeVerifyInteraction
 
 interaction:
   # Code verification interaction
   # Asks model to write Python code to verify its answer
   - name: "code_verify"
-    class_name: "sv2.interactions.code_verify_interaction.CodeVerifyInteraction"
+    class_name: "interactions.code_verify_interaction.CodeVerifyInteraction"
     config:
       max_turns: 2  # answer + code
       feedback_message: "are you sure, can you write python code to verify the calculation"

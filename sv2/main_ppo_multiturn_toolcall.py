@@ -9,7 +9,7 @@ This is a modular harness that supports:
   2) Training mode (train=True): Run training loop with periodic eval (PLACEHOLDER)
 
 Modules:
-  - sv2/data.py: Data loading utilities
+  - sv2/dataflow.py: Data loading utilities
   - sv2/reward.py: GSM8K reward function and reward manager
   - sv2/eval.py: Evaluation (rollouts + reward computation)
   - sv2/train.py: Training loop (placeholder)
@@ -40,9 +40,16 @@ from omegaconf import DictConfig, OmegaConf
 from verl.experimental.agent_loop import AgentLoopManager
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 
-from .data import build_tokenizer_processor, create_dataloader, create_dataset, select_data_paths
-from .eval import run_eval
-from .train import run_training_loop, TrainConfig
+# Support both running as package (python -m sv2.main_ppo_multiturn_toolcall from verl/)
+# and running standalone (python -m main_ppo_multiturn_toolcall from sv2/)
+try:
+    from .dataflow import build_tokenizer_processor, create_dataloader, create_dataset, select_data_paths
+    from .eval import run_eval
+    from .train import run_training_loop, TrainConfig
+except ImportError:
+    from dataflow import build_tokenizer_processor, create_dataloader, create_dataset, select_data_paths
+    from eval import run_eval
+    from train import run_training_loop, TrainConfig
 
 
 @dataclass(frozen=True)
@@ -209,7 +216,7 @@ def run(config: DictConfig) -> dict[str, Any]:
         train_dataloader = None  # Not needed for eval-only
 
     # Create AgentLoopManager
-    agent_loop_manager = AgentLoopManager(config=config, worker_group=None, rm_resource_pool=None)
+    agent_loop_manager = AgentLoopManager(config=config, worker_group=None, rm_wg=None)
 
     # Run training or eval
     if train_cfg.train:
@@ -258,7 +265,9 @@ def _hydra_entrypoint() -> None:
             "Install it (e.g. `pip install hydra-core`) or run via the normal verl launcher environment."
         ) from e
 
-    @hydra.main(config_path="../verl/trainer/config", config_name="ppo_trainer", version_base=None)
+    # Config path is relative to this file's location (sv2/)
+    # We use config/ which is sv2/config/
+    @hydra.main(config_path="config", config_name="sv2_multiturn", version_base=None)
     def _main(config: DictConfig) -> None:
         run(config)
 

@@ -25,8 +25,13 @@ import numpy as np
 from verl import DataProto
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 
-from .eval import run_eval, EvalResult
-from .reward import Sv2RewardManager
+# Support both running as package and standalone
+try:
+    from .eval import run_eval, EvalResult
+    from .reward import Sv2RewardManager
+except ImportError:
+    from eval import run_eval, EvalResult
+    from reward import Sv2RewardManager
 
 if TYPE_CHECKING:
     from torch.utils.data import DataLoader

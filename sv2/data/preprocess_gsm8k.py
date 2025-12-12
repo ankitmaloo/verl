@@ -6,8 +6,9 @@ Creates parquet files with:
 - extra_info.interaction_kwargs: For code verification interaction
 - reward_model.ground_truth: For reward computation
 
-Usage:
-  python -m sv2.data.preprocess_gsm8k --output_dir ~/data/gsm8k_sv2
+Usage (run from sv2/ folder):
+  python -m data.preprocess_gsm8k
+  # Creates data/gsm8k/train.parquet and data/gsm8k/test.parquet
 """
 
 from __future__ import annotations
@@ -86,8 +87,8 @@ def main():
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="~/data/gsm8k_sv2",
-        help="Output directory for parquet files",
+        default="data/gsm8k",
+        help="Output directory for parquet files (relative to cwd)",
     )
     parser.add_argument(
         "--interaction_name",
@@ -155,14 +156,13 @@ def main():
         print("\nNo interaction_kwargs added.")
         print("  Use sv2.interaction_name=<name> at runtime to enable interactions.")
 
-    print("\nUsage:")
-    print(f"  python -m sv2.main_ppo_multiturn_toolcall \\")
-    print(f"    --config-path sv2/config --config-name sv2_multiturn \\")
+    print("\nUsage (from sv2/ folder):")
+    print(f"  python -m main_ppo_multiturn_toolcall \\")
     print(f"    data.train_files={train_path} data.val_files={test_path} \\")
     if interaction_name:
-        print(f"    actor_rollout_ref.rollout.multi_turn.interaction_config_path=sv2/config/interaction_config.yaml")
+        print(f"    actor_rollout_ref.rollout.multi_turn.interaction_config_path=config/interaction_config.yaml")
     else:
-        print(f"    actor_rollout_ref.rollout.multi_turn.interaction_config_path=sv2/config/interaction_config.yaml \\")
+        print(f"    actor_rollout_ref.rollout.multi_turn.interaction_config_path=config/interaction_config.yaml \\")
         print(f"    sv2.interaction_name=code_verify")
 
 

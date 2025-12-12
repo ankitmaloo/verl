@@ -18,7 +18,11 @@ import torch
 from verl import DataProto
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 
-from .reward import Sv2RewardManager
+# Support both running as package and standalone
+try:
+    from .reward import Sv2RewardManager
+except ImportError:
+    from reward import Sv2RewardManager
 
 if TYPE_CHECKING:
     from torch.utils.data import DataLoader

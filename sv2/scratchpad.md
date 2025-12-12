@@ -293,3 +293,205 @@ To implement actual training, look at:
 - No KL penalty support
 - No value function / critic
 - Config inherits from `ppo_trainer` which may have extra fields we don't use
+
+---
+
+## v3.1: Bug Fixes
+
+### Error: `IndexError: list index out of range` in AgentLoopManager
+
+**Symptom:**
+```
+AgentLoopManager: []
+IndexError: list index out of range
+  File "verl/experimental/agent_loop/agent_loop.py", line 84, in _choose_server
+    server = self.weighted_serveres[0][1][1]
+```
+
+**Root cause:**
+`AgentLoopManager._initialize_llm_servers()` calculates `num_replicas = world_size // rollout_world_size`.
+When running standalone (no `worker_group`), it uses `config.trainer.n_gpus_per_node * config.trainer.nnodes`.
+
+The issue was missing config values for `data_parallel_size` and `pipeline_model_parallel_size`
+which caused `rollout_world_size` to be calculated incorrectly.
+
+**Fix:** Added explicit values in `sv2/config/sv2_multiturn.yaml`:
+```yaml
+actor_rollout_ref:
+  rollout:
+    tensor_parallel_size: 1
+    data_parallel_size: 1  # Added
+    pipeline_model_parallel_size: 1  # Added
+    free_cache_engine: false  # Added
+```
+
+### Error: `data.py` conflicts with `data/` folder
+
+**Symptom:** Import errors when running from sv2/ folder because Python can't distinguish
+between `sv2/data.py` (module) and `sv2/data/` (package).
+
+**Fix:** Renamed `sv2/data.py` → `sv2/dataflow.py`
+
+### Error: Preprocessing writes to `~/data/` instead of local folder
+
+**Symptom:** Data preprocessing creates files in `/home/ubuntu/data/gsm8k_sv2/` instead of
+within the sv2 project folder.
+
+**Fix:** Changed default `--output_dir` from `~/data/gsm8k_sv2` to `data/gsm8k` (relative path).
+
+### File structure after fixes
+```
+sv2/
+├── __init__.py
+├── install.sh
+├── main_ppo_multiturn_toolcall.py  # Main driver
+├── dataflow.py                     # Data loading (renamed from data.py)
+├── reward.py                       # GSM8K reward
+├── eval.py                         # Evaluation
+├── train.py                        # Training placeholder
+├── scratchpad.md
+├── config/
+│   ├── sv2_multiturn.yaml          # Main config
+│   └── interaction_config.yaml
+├── interactions/
+│   └── code_verify_interaction.py
+└── data/
+    ├── __init__.py
+    ├── preprocess_gsm8k.py
+    └── gsm8k/                      # Created by preprocessing
+        ├── train.parquet
+        └── test.parquet
+```
+
+### How to run (from sv2/ folder)
+
+**Step 1: Preprocess data**
+```bash
+cd /path/to/verl/sv2
+python -m data.preprocess_gsm8k
+# Creates data/gsm8k/train.parquet and data/gsm8k/test.parquet
+```
+
+**Step 2: Run eval**
+```bash
+python -m main_ppo_multiturn_toolcall \
+  data.train_files=data/gsm8k/train.parquet \
+  data.val_files=data/gsm8k/test.parquet \
+  actor_rollout_ref.rollout.multi_turn.interaction_config_path=config/interaction_config.yaml
+```
+
+
+
+---
+
+## v3.2: Bug Fixes (verl 0.6.1 compatibility)
+
+### Error: `TypeError: AgentLoopManager.__init__() got an unexpected keyword argument 'rm_resource_pool'`
+
+**Symptom:**
+```
+TypeError: AgentLoopManager.__init__() got an unexpected keyword argument 'rm_resource_pool'
+```
+
+**Root cause:**
+verl 0.6.1 uses `rm_wg` parameter name, NOT `rm_resource_pool` (which is used in main branch).
+
+**Fix:** Line 219 in `main_ppo_multiturn_toolcall.py`:
+```python
+# WRONG (main branch):
+agent_loop_manager = AgentLoopManager(config=config, worker_group=None, rm_resource_pool=None)
+
+# CORRECT (verl 0.6.1):
+agent_loop_manager = AgentLoopManager(config=config, worker_group=None, rm_wg=None)
+```
+
+### Error: Config key mismatch `tensor_parallel_size` vs `tensor_model_parallel_size`
+
+**Symptom:**
+Would cause AttributeError when AgentLoopManager._initialize_llm_servers() runs.
+
+**Root cause:**
+Config had `tensor_parallel_size: 1` but verl expects `tensor_model_parallel_size`.
+
+**Fix:** In `sv2/config/sv2_multiturn.yaml`:
+```yaml
+# WRONG:
+tensor_parallel_size: 1
+
+# CORRECT:
+tensor_model_parallel_size: 1
+```
+
+### Key lesson: verl 0.6.1 vs main branch differences
+
+When targeting verl 0.6.1, always check the released version's API, not main branch:
+- `AgentLoopManager.__init__` parameter: `rm_wg` (0.6.1) vs `rm_resource_pool` (main)
+- Config keys: Always use `tensor_model_parallel_size` (consistent across versions)
+
+---
+
+## v3.3: More Bug Fixes (standalone execution from sv2/)
+
+### Error: Hydra searchpath wrong - can't find ppo_trainer defaults
+
+**Symptom:**
+```
+Could not find 'ppo_trainer' in search path
+```
+
+**Root cause:**
+Hydra `file://` paths are relative to the config file location (`sv2/config/`).
+- WRONG: `file://../verl/trainer/config` → resolves to `sv2/config/../verl/trainer/config` = `sv2/verl/trainer/config` (doesn't exist)
+- CORRECT: `file://../../verl/trainer/config` → resolves to `sv2/config/../../verl/trainer/config` = `verl/trainer/config`
+
+**Fix:** In `sv2/config/sv2_multiturn.yaml`:
+```yaml
+hydra:
+  searchpath:
+    # Path relative to this config file (sv2/config/)
+    - file://../../verl/trainer/config
+```
+
+### Error: interaction_config.yaml class_name not found
+
+**Symptom:**
+```
+ModuleNotFoundError: No module named 'sv2'
+```
+
+**Root cause:**
+When running from inside sv2/, Python's sys.path doesn't include the parent directory, so `sv2.interactions.code_verify_interaction` can't be resolved.
+
+**Fix:** In `sv2/config/interaction_config.yaml`, use path relative to cwd:
+```yaml
+# WRONG (when running from sv2/):
+class_name: "sv2.interactions.code_verify_interaction.CodeVerifyInteraction"
+
+# CORRECT (when running from sv2/):
+class_name: "interactions.code_verify_interaction.CodeVerifyInteraction"
+```
+
+### Verified working imports (verl 0.6.1)
+
+All these imports exist in verl 0.6.1:
+- ✅ `from verl import DataProto`
+- ✅ `from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto`
+- ✅ `from verl.experimental.agent_loop import AgentLoopManager`
+- ✅ `from verl.trainer.constants_ppo import get_ppo_ray_runtime_env`
+- ✅ `from verl.trainer.main_ppo import create_rl_dataset`
+- ✅ `from verl.utils import hf_processor, hf_tokenizer`
+- ✅ `from verl.utils.dataset.rl_dataset import collate_fn`
+- ✅ `from verl.utils.fs import copy_to_local`
+- ✅ `from verl.interactions.base import BaseInteraction`
+
+### Running from sv2/ folder - checklist
+
+1. **Activate venv**: `source .venv/bin/activate` (or create via `./install.sh`)
+2. **Preprocess data**: `python -m data.preprocess_gsm8k`
+3. **Run**: `python -m main_ppo_multiturn_toolcall data.train_files=data/gsm8k/train.parquet data.val_files=data/gsm8k/test.parquet`
+
+### Potential remaining issues
+
+1. **agent_loops/tool_agent_subagent_checker.py** - Uses `@register("sv2_tool_agent_checker")` decorator. This registration happens at import time. If this module isn't imported, the agent won't be registered. May need to add explicit import somewhere.
+
+2. **interactions/__init__.py** - Imports `CodeVerifyInteraction` but verl's interaction registry loads via class_name string, not via this __init__.py. The __init__.py import is likely unused. 
