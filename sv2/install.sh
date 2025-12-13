@@ -2,15 +2,15 @@
 # sv2 standalone setup script
 # Installs verl 0.6.1 with sglang backend using uv
 #
-# What verl[sglang] installs (from setup.py):
-#   - sglang[srt,openai]==0.5.5
-#   - torch==2.8.0
-#   - tensordict>=0.8.0,<=0.10.0,!=0.9.0
+# Installation order (for CUDA 12.4 stable):
+#   1. PyTorch stable cu124 - install FIRST to set the correct CUDA version
+#   2. verl[sglang] - installs all deps (uses existing torch)
+#   3. sgl_kernel pre-built - works with stable torch
 #
 # Requirements:
-#   - NVIDIA GPU with CUDA >= 12.1
+#   - NVIDIA GPU with CUDA >= 12.1 (tested on GH200)
 #   - nvidia-smi working
-#   - ~20GB disk space for packages
+#   - ~15GB disk space for packages
 
 set -e
 
@@ -18,11 +18,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="${SCRIPT_DIR}/.venv"
 PYTHON_VERSION="3.12"
 
-echo "=== sv2 standalone setup ==="
+echo "=== sv2 standalone setup (CUDA 12.4) ==="
 echo ""
-echo "Using verl[sglang] which pins:"
-echo "  - sglang[srt,openai]==0.5.5"
-echo "  - torch==2.8.0"
+echo "Installation order:"
+echo "  1. PyTorch stable cu124 (install first)"
+echo "  2. verl[sglang] (uses existing torch)"
+echo "  3. sgl_kernel pre-built wheel"
 echo ""
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -98,16 +99,63 @@ echo "Virtual environment created: $VENV_DIR"
 echo "Python: $(python --version)"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Step 3: Install verl with sglang extra (handles torch + sglang versions)
+# Step 3: Install PyTorch with CUDA 12.4 FIRST
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "=== Installing PyTorch with CUDA 12.4 ==="
+echo "Installing stable PyTorch cu124 before other packages..."
+
+uv pip install torch torchvision torchaudio \
+    --index-url https://download.pytorch.org/whl/cu124 \
+    --no-cache-dir
+
+# Verify CUDA is available
+python -c "
+import torch
+if not torch.cuda.is_available():
+    print('ERROR: PyTorch CUDA not available!')
+    print(f'PyTorch version: {torch.__version__}')
+    print(f'CUDA version: {torch.version.cuda}')
+    exit(1)
+print(f'PyTorch {torch.__version__} with CUDA {torch.version.cuda} - OK')
+print(f'GPU: {torch.cuda.get_device_name(0)}')
+"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Step 4: Install verl[sglang] (will use existing torch)
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""
 echo "=== Installing verl[sglang] ==="
-echo "This installs verl + sglang + torch==2.8.0 with correct versions..."
+echo "Note: Using existing PyTorch with CUDA 12.4"
 
+# Use --no-deps for torch-related packages to avoid overwriting our CUDA torch
 uv pip install "verl[sglang]==0.6.1" --no-cache-dir
 
+# Re-verify PyTorch CUDA is still available (in case verl overwrote it)
+CUDA_OK=$(python -c "import torch; print('1' if torch.cuda.is_available() else '0')")
+if [ "$CUDA_OK" != "1" ]; then
+    echo "WARNING: verl install may have overwritten CUDA torch. Reinstalling..."
+    uv pip install torch torchvision torchaudio \
+        --index-url https://download.pytorch.org/whl/cu124 \
+        --reinstall --no-cache-dir
+fi
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Step 4: Install additional dependencies for sv2
+# Step 5: Install sgl_kernel (pre-built wheel works with stable torch)
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "=== Installing sgl_kernel ==="
+
+# Uninstall any existing sgl_kernel first
+uv pip uninstall sgl_kernel -y 2>/dev/null || true
+
+# Install sgl_kernel - pre-built wheels work with stable PyTorch
+uv pip install sgl_kernel --no-cache-dir
+
+echo "sgl_kernel installed successfully"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Step 6: Install additional dependencies
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""
 echo "=== Installing additional dependencies ==="
@@ -115,15 +163,11 @@ echo "=== Installing additional dependencies ==="
 # torch-memory-saver for memory optimization
 uv pip install torch-memory-saver --no-cache-dir
 
-# FlashInfer for fast attention (optional but recommended)
-echo "Installing FlashInfer..."
-uv pip install flashinfer-python --no-cache-dir || echo "Warning: FlashInfer install failed (may need manual install)"
-
 # ─────────────────────────────────────────────────────────────────────────────
-# Step 5: Verify installation
+# Step 7: Final verification
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""
-echo "=== Verifying installation ==="
+echo "=== Final Verification ==="
 
 python -c "
 import torch
@@ -133,7 +177,8 @@ if torch.cuda.is_available():
     print(f'CUDA version: {torch.version.cuda}')
     print(f'GPU: {torch.cuda.get_device_name(0)}')
 else:
-    print('WARNING: CUDA not available!')
+    print('ERROR: CUDA not available!')
+    exit(1)
 "
 
 echo ""
@@ -142,12 +187,25 @@ python -c "import sglang; print(f'sglang: {sglang.__version__}')" || echo "Warni
 python -c "import hydra; print('hydra: OK')"
 python -c "import ray; print(f'ray: {ray.__version__}')"
 
+# Verify sgl_kernel loads correctly
+echo ""
+echo "Verifying sgl_kernel..."
+python -c "
+import sgl_kernel
+import os
+pkg_dir = os.path.dirname(sgl_kernel.__file__)
+print(f'sgl_kernel location: {pkg_dir}')
+for item in sorted(os.listdir(pkg_dir)):
+    if item.startswith('sm'):
+        print(f'  Architecture: {item}')
+"
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Done
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""
 echo "=========================================="
-echo "=== sv2 setup complete ==="
+echo "=== sv2 setup complete (CUDA 12.4) ==="
 echo "=========================================="
 echo ""
 echo "Activate: source $VENV_DIR/bin/activate"
