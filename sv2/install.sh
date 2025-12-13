@@ -8,7 +8,7 @@
 #   3. sgl_kernel pre-built - works with stable torch
 #
 # Requirements:
-#   - NVIDIA GPU with CUDA >= 12.1 (tested on GH200)
+#   - NVIDIA GPU with CUDA >= 12.1 (tested on H100)
 #   - nvidia-smi working
 #   - ~15GB disk space for packages
 
