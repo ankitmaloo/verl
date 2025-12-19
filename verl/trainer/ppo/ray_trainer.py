@@ -24,7 +24,6 @@ import uuid
 from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass, field
-from itertools import chain
 from pprint import pprint
 from typing import Optional
 
@@ -32,7 +31,6 @@ import numpy as np
 import ray
 import torch
 from omegaconf import OmegaConf, open_dict
-from tensordict import NonTensorData
 from torch.utils.data import Dataset, Sampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
@@ -57,12 +55,14 @@ from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
+from verl.utils.import_utils import load_class_from_fqn
 from verl.utils.metric import reduce_metrics
-from verl.utils.py_functional import append_to_dict
+from verl.utils.py_functional import rename_dict
 from verl.utils.rollout_skip import RolloutSkip
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
+from verl.workers.config import FSDPEngineConfig
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
 
@@ -328,7 +328,10 @@ class RayPPOTrainer:
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
         self.use_reference_policy = need_reference_policy(self.role_worker_mapping)
+        # legacy reward model implementation
         self.use_rm = need_reward_model(self.role_worker_mapping)
+        self.use_reward_loop = self.config.reward_model.use_reward_loop
+
         self.use_critic = need_critic(self.config)
         self.ray_worker_group_cls = ray_worker_group_cls
         self.device_name = device_name if device_name else self.config.trainer.device
@@ -703,7 +706,31 @@ class RayPPOTrainer:
         # create critic
         if self.use_critic:
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.Critic)
-            critic_cfg = omega_conf_to_dataclass(self.config.critic)
+
+            from verl.workers.config import CriticConfig
+
+            critic_cfg: CriticConfig = omega_conf_to_dataclass(self.config.critic)
+
+            if self.use_legacy_worker_impl == "disable":
+                # convert critic_cfg into TrainingWorkerConfig
+                from verl.workers.engine_workers import TrainingWorkerConfig
+
+                orig_critic_cfg = critic_cfg
+                if orig_critic_cfg.strategy == "fsdp":
+                    engine_config: FSDPEngineConfig = orig_critic_cfg.model.fsdp_config
+                    engine_config.infer_max_token_len_per_gpu = critic_cfg.ppo_infer_max_token_len_per_gpu
+                    engine_config.max_token_len_per_gpu = critic_cfg.ppo_max_token_len_per_gpu
+                else:
+                    raise NotImplementedError(f"Unknown strategy {orig_critic_cfg.strategy=}")
+
+                critic_cfg = TrainingWorkerConfig(
+                    model_type="value_model",
+                    model_config=orig_critic_cfg.model_config,
+                    engine_config=engine_config,
+                    optimizer_config=orig_critic_cfg.optim,
+                    checkpoint_config=orig_critic_cfg.checkpoint,
+                )
+
             critic_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.Critic], config=critic_cfg)
             self.resource_pool_to_cls[resource_pool][str(Role.Critic)] = critic_cls
 
@@ -718,11 +745,37 @@ class RayPPOTrainer:
             self.resource_pool_to_cls[resource_pool][str(Role.RefPolicy)] = ref_policy_cls
 
         # create a reward model if reward_fn is None
-        if self.use_rm:
-            # we create a RM here
-            resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel)
-            rm_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.RewardModel], config=self.config.reward_model)
-            self.resource_pool_to_cls[resource_pool][str(Role.RewardModel)] = rm_cls
+        # for legacy discriminative reward model, we create a reward model worker here
+        # for reward loop discriminative reward model, we create a reward loop manager here
+        if not self.use_reward_loop:
+            # legacy reward model only handle reward-model based scenario
+            if self.use_rm:
+                # we create a RM here
+                resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel)
+                rm_cls = RayClassWithInitArgs(
+                    self.role_worker_mapping[Role.RewardModel], config=self.config.reward_model
+                )
+                self.resource_pool_to_cls[resource_pool][str(Role.RewardModel)] = rm_cls
+        else:
+            # reward loop handle hybrid reward scenario (rule, disrm, genrm, ...)
+            can_reward_loop_parallelize = self.config.actor_rollout_ref.rollout.mode == "async" and (
+                not self.use_rm or self.config.reward_model.enable_resource_pool
+            )
+            # judge if we can asynchronously parallelize reward model with actor rollout
+            # two condition that we can parallelize reward model with actor rollout:
+            # 1. reward model is not enabled (rule-based reward can parallelize)
+            # 2. reward model is enabled but extra resource pool is enabled
+            # If we cannot parallelize, we should enable synchronous mode here, and launch a reward loop manager here
+            # else for parallelize mode, we launch a reward worker for each rollout worker (in agent loop, not here)
+            if not can_reward_loop_parallelize:
+                from verl.experimental.reward import RewardLoopManager
+
+                self.config.reward_model.n_gpus_per_node = self.config.trainer.n_gpus_per_node
+                resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel)
+                self.reward_loop_manager = RewardLoopManager(
+                    config=self.config,
+                    rm_resource_pool=resource_pool,
+                )
 
         # initialize WorkerGroup
         # NOTE: if you want to use a different resource pool for each role, which can support different parallel size,
@@ -758,7 +811,17 @@ class RayPPOTrainer:
 
         if self.use_critic:
             self.critic_wg = all_wg[str(Role.Critic)]
-            self.critic_wg.init_model()
+            if self.use_legacy_worker_impl == "disable":
+                self.critic_wg.reset()
+                # assign critic loss
+                from functools import partial
+
+                from verl.workers.utils.losses import value_loss
+
+                value_loss_ = partial(value_loss, config=orig_critic_cfg)
+                self.critic_wg.set_loss_fn(value_loss_)
+            else:
+                self.critic_wg.init_model()
 
         if self.use_reference_policy and not self.ref_in_actor:
             if str(Role.RefPolicy) in all_wg:
@@ -771,7 +834,7 @@ class RayPPOTrainer:
 
         self.rm_wg = None
         # initalization of rm_wg will be deprecated in the future
-        if self.use_rm:
+        if self.use_rm and not self.use_reward_loop:
             self.rm_wg = all_wg[str(Role.RewardModel)]
             self.rm_wg.init_model()
 
@@ -785,7 +848,12 @@ class RayPPOTrainer:
         # create async rollout manager and request scheduler
         self.async_rollout_mode = False
         if self.config.actor_rollout_ref.rollout.mode == "async":
-            from verl.experimental.agent_loop import AgentLoopManager
+            # Support custom AgentLoopManager via config
+            manager_class_fqn = self.config.actor_rollout_ref.rollout.get("agent", {}).get("agent_loop_manager_class")
+            if manager_class_fqn:
+                AgentLoopManager = load_class_from_fqn(manager_class_fqn, "AgentLoopManager")
+            else:
+                from verl.experimental.agent_loop import AgentLoopManager
 
             self.async_rollout_mode = True
             if self.config.reward_model.enable and self.config.reward_model.enable_resource_pool:
@@ -933,7 +1001,7 @@ class RayPPOTrainer:
                 self.ref_policy_wg.start_profile(profile_step=self.global_steps)
             if self.use_critic:
                 self.critic_wg.start_profile(profile_step=self.global_steps)
-            if self.use_rm:
+            if self.use_rm and not self.use_reward_loop:
                 self.rm_wg.start_profile(profile_step=self.global_steps)
 
     def _stop_profiling(self, do_profile: bool) -> None:
@@ -944,7 +1012,7 @@ class RayPPOTrainer:
                 self.ref_policy_wg.stop_profile()
             if self.use_critic:
                 self.critic_wg.stop_profile()
-            if self.use_rm:
+            if self.use_rm and not self.use_reward_loop:
                 self.rm_wg.stop_profile()
 
     def _balance_batch(self, batch: DataProto, metrics, logging_prefix="global_seqlen", keep_minibatch=False):
@@ -983,6 +1051,23 @@ class RayPPOTrainer:
             seqlen_list=global_seqlen_lst, partitions=global_partition_lst, prefix=logging_prefix
         )
         metrics.update(global_balance_stats)
+
+    def _compute_values(self, batch: DataProto) -> DataProto:
+        if self.use_legacy_worker_impl == "disable":
+            batch_td = batch.to_tensordict()
+            # step 2: convert from padding to nopadding
+            batch_td = left_right_2_no_padding(batch_td)
+            # step 3: add meta info
+            tu.assign_non_tensor(batch_td, compute_loss=False)
+            output = self.critic_wg.infer_batch(batch_td)
+            output = output.get()
+            values = tu.get(output, "values")
+            values = no_padding_2_padding(values, batch_td)
+            values = tu.get_tensordict({"values": values.float()})
+            values = DataProto.from_tensordict(values)
+        else:
+            values = self.critic_wg.compute_values(batch)
+        return values
 
     def _compute_ref_log_prob(self, batch: DataProto) -> DataProto:
         if self.use_legacy_worker_impl == "disable":
@@ -1046,57 +1131,55 @@ class RayPPOTrainer:
             ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs
             seed = self.config.actor_rollout_ref.actor.data_loader_seed
             shuffle = self.config.actor_rollout_ref.actor.shuffle
-            tu.assign_non_tensor(batch_td, calculate_entropy=calculate_entropy, global_batch_size=ppo_mini_batch_size)
-
-            # make iterator
-            dataloader = tu.make_iterator(
+            tu.assign_non_tensor(
                 batch_td,
+                calculate_entropy=calculate_entropy,
+                global_batch_size=ppo_mini_batch_size,
                 mini_batch_size=ppo_mini_batch_size,
                 epochs=ppo_epochs,
                 seed=seed,
                 dataloader_kwargs={"shuffle": shuffle},
             )
-            # manually wakeup actor
-            self.actor_rollout_wg.to("device")
 
-            # update
-            output_ref_lst = []
-            total_num_iterations = batch_td.shape[0] // ppo_mini_batch_size * ppo_epochs
-            for batch_idx, mini_batch_td in enumerate(dataloader):
-                # add global token num
-                global_token_num = mini_batch_td["input_ids"].offsets().diff().tolist()
-                tu.assign_non_tensor(
-                    mini_batch_td,
-                    global_token_num=NonTensorData(global_token_num),
-                    update_lr_scheduler=batch_idx == total_num_iterations - 1,
-                    disable_auto_offload=True,
-                )
-                actor_output_ref = self.actor_rollout_wg.train_batch(mini_batch_td)
-                output_ref_lst.append(actor_output_ref)
-
-            actor_output = [output_ref.get() for output_ref in output_ref_lst]
-            actor_output = [tu.get(output, "metrics") for output in actor_output]
-
-            # manually sleep actor
-            self.actor_rollout_wg.to("cpu")
-
-            # each metric is a list of list (dp and micro-batch) (output[0] is metric in dp[0])
-            # flatten each metric
-            agg_actor_output = {}
-            for output in actor_output:
-                for key, val in output.items():
-                    # flattn dp and micro batch
-                    if isinstance(val, list):
-                        output[key] = list(chain.from_iterable(val))
-                append_to_dict(agg_actor_output, output, prefix="actor/")
-
+            actor_output = self.actor_rollout_wg.update_actor(batch_td)
+            actor_output = tu.get(actor_output, "metrics")
+            actor_output = rename_dict(actor_output, "actor/")
             # modify key name
-            agg_actor_output["perf/mfu/actor"] = agg_actor_output.pop("actor/mfu")
-
-            actor_output = DataProto.from_single_dict(data={}, meta_info={"metrics": agg_actor_output})
+            actor_output["perf/mfu/actor"] = actor_output.pop("actor/mfu")
+            actor_output = DataProto.from_single_dict(data={}, meta_info={"metrics": actor_output})
         else:
             actor_output = self.actor_rollout_wg.update_actor(batch)
         return actor_output
+
+    def _update_critic(self, batch: DataProto) -> DataProto:
+        if self.use_legacy_worker_impl == "disable":
+            batch_td = batch.to_tensordict()
+            # step 2: convert from padding to no-padding
+            batch_td = left_right_2_no_padding(batch_td)
+            ppo_mini_batch_size = self.config.critic.ppo_mini_batch_size
+            ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
+            ppo_epochs = self.config.critic.ppo_epochs
+            seed = self.config.critic.data_loader_seed
+            shuffle = self.config.critic.shuffle
+            tu.assign_non_tensor(
+                batch_td,
+                global_batch_size=ppo_mini_batch_size,
+                mini_batch_size=ppo_mini_batch_size,
+                epochs=ppo_epochs,
+                seed=seed,
+                dataloader_kwargs={"shuffle": shuffle},
+            )
+
+            output = self.critic_wg.train_mini_batch(batch_td)
+            output = output.get()
+            output = tu.get(output, "metrics")
+            output = rename_dict(output, "critic/")
+            # modify key name
+            output["perf/mfu/critic"] = output.pop("critic/mfu")
+            critic_output = DataProto.from_single_dict(data={}, meta_info={"metrics": output})
+        else:
+            critic_output = self.critic_wg.update_critic(batch)
+        return critic_output
 
     def fit(self):
         """
@@ -1209,7 +1292,11 @@ class RayPPOTrainer:
                             # compute reward model score on batch
                             rm_scores = None
                             if self.use_rm and "rm_scores" not in batch.batch.keys():
-                                rm_scores = self.rm_wg.compute_rm_score(batch)
+                                if not self.use_reward_loop:
+                                    rm_scores = self.rm_wg.compute_rm_score(batch)
+                                else:
+                                    assert self.reward_loop_manager is not None, "RewardLoopManager is None"
+                                    rm_scores = self.reward_loop_manager.compute_rm_score(batch)
                                 batch = batch.union(rm_scores)
                             reward_baseline_tensor, _ = compute_reward(batch, self.reward_fn)
                             reward_baseline_tensor = reward_baseline_tensor.sum(dim=-1)
@@ -1241,7 +1328,11 @@ class RayPPOTrainer:
                     with marked_timer("reward", timing_raw, color="yellow"):
                         # compute reward model score
                         if self.use_rm and "rm_scores" not in batch.batch.keys():
-                            reward_tensor = self.rm_wg.compute_rm_score(batch)
+                            if not self.use_reward_loop:
+                                reward_tensor = self.rm_wg.compute_rm_score(batch)
+                            else:
+                                assert self.reward_loop_manager is not None, "RewardLoopManager is None"
+                                reward_tensor = self.reward_loop_manager.compute_rm_score(batch)
                             batch = batch.union(reward_tensor)
 
                         if self.config.reward_model.launch_reward_fn_async:
@@ -1258,9 +1349,9 @@ class RayPPOTrainer:
                     rollout_corr_config = self.config.algorithm.get("rollout_correction", None)
                     bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
                     if bypass_recomputing_logprobs:  # Use `rollout_log_probs`
-                        from verl.trainer.ppo.rollout_corr_helper import apply_rollout_correction
+                        from verl.trainer.ppo.rollout_corr_helper import apply_bypass_mode
 
-                        apply_rollout_correction(
+                        apply_bypass_mode(
                             batch=batch,
                             rollout_corr_config=rollout_corr_config,
                             policy_loss_config=self.config.actor_rollout_ref.actor.policy_loss,
@@ -1301,7 +1392,7 @@ class RayPPOTrainer:
                     # compute values
                     if self.use_critic:
                         with marked_timer("values", timing_raw, color="cyan"):
-                            values = self.critic_wg.compute_values(batch)
+                            values = self._compute_values(batch)
                             batch = batch.union(values)
 
                     with marked_timer("adv", timing_raw, color="brown"):
@@ -1356,7 +1447,7 @@ class RayPPOTrainer:
                     # update critic
                     if self.use_critic:
                         with marked_timer("update_critic", timing_raw, color="pink"):
-                            critic_output = self.critic_wg.update_critic(batch)
+                            critic_output = self._update_critic(batch)
                         critic_output_metrics = reduce_metrics(critic_output.meta_info["metrics"])
                         metrics.update(critic_output_metrics)
 
