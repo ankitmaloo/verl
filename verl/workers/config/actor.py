@@ -18,14 +18,32 @@ from typing import Any, Optional
 from omegaconf import MISSING
 
 from verl.base_config import BaseConfig
-from verl.trainer.config import CheckpointConfig
+from verl.trainer.config import CheckpointConfig, RolloutCorrectionConfig
 from verl.utils.profiler.config import ProfilerConfig
+from verl.utils.qat import QATConfig
 
-from .engine import FSDPEngineConfig, McoreEngineConfig
+from .checkpoint import McoreCheckpointConfig, MindSpeedCheckpointConfig
+from .engine import (
+    FSDPEngineConfig,
+    McoreEngineConfig,
+    MindSpeedEngineConfig,
+    TorchtitanEngineConfig,
+    VeOmniEngineConfig,
+)
 from .model import HFModelConfig
 from .optimizer import OptimizerConfig
 
-__all__ = ["PolicyLossConfig", "RouterReplayConfig", "ActorConfig", "FSDPActorConfig", "McoreActorConfig"]
+__all__ = [
+    "PolicyLossConfig",
+    "RouterReplayConfig",
+    "ActorConfig",
+    "FSDPActorConfig",
+    "McoreActorConfig",
+    "VeOmniActorConfig",
+    "QATConfig",
+    "TorchTitanActorConfig",
+    "MindSpeedActorConfig",
+]
 
 
 @dataclass
@@ -70,6 +88,7 @@ class PolicyLossConfig(BaseConfig):
         clip_cov_ub (float): Upper bound for clip-cov loss.
         kl_cov_ratio (float): Ratio of tokens to be applied KL penalty for kl-cov loss.
         ppo_kl_coef (float): KL divergence penalty coefficient.
+        rollout_correction (RolloutCorrectionConfig): Configuration for rollout correction.
     """
 
     loss_mode: str = "vanilla"
@@ -78,6 +97,7 @@ class PolicyLossConfig(BaseConfig):
     clip_cov_ub: float = 5.0
     kl_cov_ratio: float = 0.0002
     ppo_kl_coef: float = 0.1
+    rollout_correction: RolloutCorrectionConfig = field(default_factory=RolloutCorrectionConfig)
 
 
 @dataclass
@@ -147,6 +167,7 @@ class ActorConfig(BaseConfig):
     tau_pos: float = 1.0
     tau_neg: float = 1.05
     calculate_entropy: bool = False
+    calculate_sum_pi_squared: bool = False
     use_kl_loss: bool = False
     # Whether to enable PrefixGrouper-based shared-prefix forward
     use_prefix_grouper: bool = False
@@ -155,7 +176,7 @@ class ActorConfig(BaseConfig):
     kl_loss_type: str = "low_var_kl"
     ppo_epochs: int = 1
     shuffle: bool = False
-    data_loader_seed: int = 1
+    data_loader_seed: int = 42
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
     optim: OptimizerConfig = field(default_factory=OptimizerConfig)
     use_fused_kernels: bool = False
@@ -170,6 +191,7 @@ class ActorConfig(BaseConfig):
     # batch_num_tokens: number of valid tokens in global batch
     # global_batch_size: global batch size
     global_batch_info: dict = field(default_factory=dict)
+    qat: QATConfig = field(default_factory=QATConfig)
 
     def __post_init__(self):
         """Validate actor configuration parameters."""
@@ -243,16 +265,17 @@ class McoreActorConfig(ActorConfig):
 
     Args:
         strategy (str): Training strategy set to 'megatron' for Megatron parallelism.
-        load_weight (bool): Whether to load model weights from checkpoint.
         megatron (dict[str, Any]): Configuration for Megatron parallelism settings.
         profile (dict[str, Any]): Configuration for profiling settings.
+        checkpoint (McoreCheckpointConfig): Megatron-specific checkpoint config
+            that adds ``mbridge_config`` on top of the base checkpoint fields.
     """
 
     strategy: str = "megatron"
-    load_weight: bool = True
     megatron: McoreEngineConfig = field(default_factory=McoreEngineConfig)
     profile: dict[str, Any] = field(default_factory=dict)
     use_rollout_log_probs: bool = False
+    checkpoint: McoreCheckpointConfig = field(default_factory=McoreCheckpointConfig)
 
     def __post_init__(self):
         """Validate FSDP actor configuration parameters."""
@@ -285,13 +308,15 @@ class FSDPActorConfig(ActorConfig):
     fsdp_config: FSDPEngineConfig = field(default_factory=FSDPEngineConfig)
     use_remove_padding: bool = False
     use_rollout_log_probs: bool = False
-    calculate_sum_pi_squared: bool = False
-    sum_pi_squared_checkpointing: bool = False
 
     def __post_init__(self):
         """Validate FSDP actor configuration parameters."""
         super().__post_init__()
         self.engine = self.fsdp_config
+        # Sync strategy to engine config so engine_workers can pick the right FSDP version.
+        # EngineConfig.strategy defaults to None, so without this, engine_workers.py always
+        # falls back to FSDP1 even when actor.strategy="fsdp2".
+        object.__setattr__(self.engine, "strategy", self.strategy)
 
         # backward compatibility
         if self.ulysses_sequence_parallel_size > 1:
@@ -300,9 +325,93 @@ class FSDPActorConfig(ActorConfig):
     def validate(self, n_gpus: int, train_batch_size: int, model_config: dict = None):
         """Validate FSDP actor configuration with runtime parameters."""
         super().validate(n_gpus, train_batch_size, model_config)
+        if (
+            self.ulysses_sequence_parallel_size > 1
+            and model_config
+            and not model_config.get("use_remove_padding", False)
+        ):
+            raise ValueError(
+                "When using sequence parallelism for actor/ref policy, you must enable `use_remove_padding`."
+            )
 
-        if self.strategy in {"fsdp", "fsdp2"} and self.ulysses_sequence_parallel_size > 1:
-            if model_config and not model_config.get("use_remove_padding", False):
-                raise ValueError(
-                    "When using sequence parallelism for actor/ref policy, you must enable `use_remove_padding`."
-                )
+
+@dataclass
+class VeOmniActorConfig(ActorConfig):
+    """Configuration for VeOmni actor models.
+
+    The inheritance from BaseConfig provides omegaconf.DictConfig-like interface for a dataclass config.
+
+    Args:
+        strategy (str): Training strategy set to 'veomni' for VeOmni parallelism.
+        veomni (dict[str, Any]): Configuration for VeOmni settings.
+        use_remove_padding (bool): Whether to remove padding tokens in inputs during training
+    """
+
+    strategy: str = "veomni"
+    veomni: VeOmniEngineConfig = field(default_factory=VeOmniEngineConfig)
+    use_remove_padding: bool = False
+    use_rollout_log_probs: bool = False
+
+    def __post_init__(self):
+        """Validate VeOmni actor configuration parameters."""
+        super().__post_init__()
+        self.engine = self.veomni
+        if self.veomni.router_replay.mode != "disabled" and not self.use_remove_padding:
+            raise RuntimeError(
+                "router_replay requires use_remove_padding=True. In VeOmni engine, "
+                "the non-remove-padding path also disables Ulysses SP slicing and "
+                "the fused-kernel log_probs path, and is not a tested production "
+                "configuration for MoE routing replay. Set "
+                "actor.use_remove_padding=True or router_replay.mode='disabled'."
+            )
+
+
+@dataclass
+class TorchTitanActorConfig(ActorConfig):
+    """Configuration for TorchTitan actor models.
+
+    The inheritance from BaseConfig provides omegaconf.DictConfig-like interface for a dataclass config.
+
+    Args:
+        strategy (str): Training strategy set to 'torchtitan' for TorchTitan parallelism.
+        torchtitan (TorchtitanEngineConfig): Configuration for TorchTitan engine settings.
+        use_remove_padding (bool): Whether to remove padding tokens in inputs during training
+        use_rollout_log_probs (bool): Whether to use log probabilities from rollout engine
+    """
+
+    strategy: str = "torchtitan"
+    torchtitan: TorchtitanEngineConfig = field(default_factory=TorchtitanEngineConfig)
+    use_remove_padding: bool = False
+    use_rollout_log_probs: bool = False
+
+    def __post_init__(self):
+        """Validate TorchTitan actor configuration parameters."""
+        super().__post_init__()
+        self.engine = self.torchtitan
+
+
+@dataclass
+class MindSpeedActorConfig(ActorConfig):
+    """Configuration for mindspeed actor models.
+
+    The inheritance from BaseConfig provides omegaconf.DictConfig-like interface for a dataclass config.
+
+    Args:
+        strategy (str): Training strategy set to 'mindspeed' for mindspeed parallelism.
+        mindspeed (dict[str, Any]): Configuration for mindspeed parallelism settings.
+        profile (dict[str, Any]): Configuration for profiling settings.
+        use_rollout_log_probs (bool): Whether to use log probabilities from rollout engine.
+        checkpoint (MindSpeedCheckpointConfig): MindSpeed-specific checkpoint config
+            (inherits ``mbridge_config`` from :class:`McoreCheckpointConfig`).
+    """
+
+    strategy: str = "mindspeed"
+    mindspeed: MindSpeedEngineConfig = field(default_factory=MindSpeedEngineConfig)
+    profile: dict[str, Any] = field(default_factory=dict)
+    use_rollout_log_probs: bool = False
+    checkpoint: MindSpeedCheckpointConfig = field(default_factory=MindSpeedCheckpointConfig)
+
+    def __post_init__(self):
+        """Validate MindSpeed actor configuration parameters."""
+        super().__post_init__()
+        self.engine = self.mindspeed
